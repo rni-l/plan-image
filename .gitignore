@@ -1,6 +1,22 @@
+# Superpowers / tooling
 .superpowers/
+
+# Runtime data — never commit
 .data/
 exports/
 .env
 .env.*
 !.env.example
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+packages/*/dist/
+
+# Drizzle generated migrations (keep in VCS once stable; ignore during early dev)
+# packages/server/src/db/migrations/
+
+# macOS
+.DS_Store
