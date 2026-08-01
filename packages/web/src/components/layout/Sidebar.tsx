@@ -1,10 +1,12 @@
 import { NavLink, useLocation } from "react-router-dom";
-import { Package, ListTodo, Settings } from "lucide-react";
+import { Package, ListTodo, ScrollText, CircleDollarSign, Settings } from "lucide-react";
 import { cn } from "@/lib/utils.js";
 
 const mainNav = [
-  { to: "/products", label: "商品库", icon: Package },
+  { to: "/products",  label: "商品库",   icon: Package },
   { to: "/task-center", label: "任务中心", icon: ListTodo },
+  { to: "/logs",      label: "日志记录", icon: ScrollText },
+  { to: "/billing",   label: "用量计费", icon: CircleDollarSign },
 ];
 
 const bottomNav = [

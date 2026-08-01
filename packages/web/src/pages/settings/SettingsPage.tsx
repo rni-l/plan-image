@@ -189,7 +189,9 @@ function ProviderCard({
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
         {meta.hasBaseUrl && (
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor={`${provider.name}-baseurl`}>Base URL</Label>
+            <Label htmlFor={`${provider.name}-baseurl`}>
+              {provider.name === "bailian" ? "专属服务地址 Base URL" : "Base URL"}
+            </Label>
             <Input
               id={`${provider.name}-baseurl`}
               placeholder="https://api.example.com"

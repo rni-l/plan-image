@@ -28,6 +28,12 @@ export interface GatewayRequest {
   parameters?: Record<string, unknown>;
 }
 
+export interface GatewayUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface GatewayResponse {
   /** Primary text output */
   text?: string;
@@ -35,6 +41,8 @@ export interface GatewayResponse {
   image?: string;
   /** Mime type of image output */
   imageMime?: "image/jpeg" | "image/png" | "image/webp";
+  /** Token usage — populated by text/vision calls; absent for image-gen */
+  usage?: GatewayUsage;
 }
 
 /** Normalized error types surfaced to jobs and UI */

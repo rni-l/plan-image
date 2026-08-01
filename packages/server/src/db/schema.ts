@@ -1,4 +1,4 @@
-import { integer, text, sqliteTable } from "drizzle-orm/sqlite-core";
+import { integer, real, text, sqliteTable } from "drizzle-orm/sqlite-core";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -292,6 +292,39 @@ export const modelCallLogs = sqliteTable("model_call_logs", {
   status: text("status").notNull(), // 'succeeded' | 'failed'
   errorType: text("error_type"),
   durationMs: integer("duration_ms"),
+  promptTokens: integer("prompt_tokens"),
+  completionTokens: integer("completion_tokens"),
+  totalTokens: integer("total_tokens"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   // NOTE: prompt text, request headers, and API keys are never stored here
+});
+
+// ---------------------------------------------------------------------------
+// Logs & Billing
+// ---------------------------------------------------------------------------
+
+/** Records every inbound HTTP API request for auditing and diagnostics */
+export const apiRequestLogs = sqliteTable("api_request_logs", {
+  id: text("id").primaryKey(),
+  method: text("method").notNull(),
+  path: text("path").notNull(),
+  statusCode: integer("status_code"),
+  durationMs: integer("duration_ms"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+});
+
+/** Per-model pricing config used to compute costs in the billing view */
+export const modelPricing = sqliteTable("model_pricing", {
+  id: text("id").primaryKey(),
+  provider: text("provider").notNull(),
+  modelId: text("model_id").notNull(),
+  /** Price in USD per 1 million input tokens (text models) */
+  pricePerMInputTokens: real("price_per_m_input_tokens").notNull().default(0),
+  /** Price in USD per 1 million output tokens (text models) */
+  pricePerMOutputTokens: real("price_per_m_output_tokens").notNull().default(0),
+  /** 1 = image-generation model, 0 = text/vision model */
+  isImageModel: integer("is_image_model", { mode: "boolean" }).notNull().default(false),
+  /** Price in USD per generated image (image models) */
+  pricePerImage: real("price_per_image").notNull().default(0),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });

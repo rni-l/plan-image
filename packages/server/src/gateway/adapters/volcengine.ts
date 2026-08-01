@@ -51,12 +51,27 @@ export class VolcengineAdapter implements ModelAdapter {
       ...(req.parameters ?? {}),
     });
 
-    const data = res as { choices?: Array<{ message?: { content?: string } }> };
+    const data = res as {
+      choices?: Array<{ message?: { content?: string } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    };
     const text = data.choices?.[0]?.message?.content;
     if (typeof text !== "string") {
       throw new GatewayError("invalid_response", "火山方舟返回了非预期的响应结构");
     }
-    return { text };
+    const u = data.usage;
+    return {
+      text,
+      ...(u
+        ? {
+            usage: {
+              promptTokens: u.prompt_tokens ?? 0,
+              completionTokens: u.completion_tokens ?? 0,
+              totalTokens: u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0),
+            },
+          }
+        : {}),
+    };
   }
 
   private async imageGeneration(req: GatewayRequest): Promise<GatewayResponse> {

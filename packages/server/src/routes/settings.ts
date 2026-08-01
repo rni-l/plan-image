@@ -119,7 +119,7 @@ settingsRouter.put("/routes/:scene", async (c) => {
   const existing = await db
     .select()
     .from(modelSceneRoutes)
-    .where(eq(modelSceneRoutes.scene, scene));
+    .where(eq(modelSceneRoutes.scene, scene as import("../db/schema.js").SceneKey));
 
   if (existing.length > 0) {
     await db
@@ -130,11 +130,11 @@ settingsRouter.put("/routes/:scene", async (c) => {
         parameters: body.parameters ? JSON.stringify(body.parameters) : null,
         updatedAt: now,
       })
-      .where(eq(modelSceneRoutes.scene, scene));
+      .where(eq(modelSceneRoutes.scene, scene as import("../db/schema.js").SceneKey));
   } else {
     await db.insert(modelSceneRoutes).values({
       id: randomUUID(),
-      scene,
+      scene: scene as import("../db/schema.js").SceneKey,
       providerId: provider.id,
       modelId: body.modelId,
       parameters: body.parameters ? JSON.stringify(body.parameters) : null,
@@ -145,7 +145,7 @@ settingsRouter.put("/routes/:scene", async (c) => {
   const [row] = await db
     .select()
     .from(modelSceneRoutes)
-    .where(eq(modelSceneRoutes.scene, scene));
+    .where(eq(modelSceneRoutes.scene, scene as import("../db/schema.js").SceneKey));
   return c.json({ ...row, providerName: body.providerName });
 });
 

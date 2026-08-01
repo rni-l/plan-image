@@ -75,6 +75,7 @@ ${effectiveCards.map((c, i) => `图片${i + 1}: ${JSON.stringify(c)}`).join("\n"
 只输出JSON，不输出任何额外说明。`;
 
   const response = await gatewayCall("competitor_synthesis", {
+    scene: "competitor_synthesis",
     prompt,
     systemPrompt: SYSTEM_PROMPT,
   });

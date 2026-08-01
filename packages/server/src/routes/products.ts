@@ -182,7 +182,7 @@ productsRouter.post("/:id/assets", async (c) => {
     return c.json({ error: "Missing file field" }, 400);
   }
 
-  const buffer = Buffer.from(await file.arrayBuffer());
+  const buffer = Buffer.from(await (file as File).arrayBuffer());
   const assetId = randomUUID();
 
   try {
@@ -303,6 +303,62 @@ productsRouter.delete("/:id/competitor-assets/:assetId", async (c) => {
 
   await db.delete(competitorAssets).where(eq(competitorAssets.id, assetId));
   return c.body(null, 204);
+});
+
+// ---------------------------------------------------------------------------
+// Generation tasks for this product
+// ---------------------------------------------------------------------------
+
+// GET /api/products/:id/tasks
+productsRouter.get("/:id/tasks", async (c) => {
+  const productId = c.req.param("id");
+  const { generationTasks } = await import("../db/schema.js");
+  const rows = await db
+    .select()
+    .from(generationTasks)
+    .where(eq(generationTasks.productId, productId))
+    .orderBy(desc(generationTasks.updatedAt));
+  return c.json(rows);
+});
+
+// POST /api/products/:id/tasks — create a new generation task
+productsRouter.post("/:id/tasks", async (c) => {
+  const productId = c.req.param("id");
+  const [product] = await db.select().from(products).where(eq(products.id, productId));
+  if (!product) return c.json({ error: "Product not found" }, 404);
+
+  const body = await c.req.json<{
+    analysisVersionId: string;
+    outputTypes: string[];  // ["main_image", "detail_page"]
+  }>();
+
+  const { generationTasks, modelSceneRoutes, modelProviders, outputPresets } =
+    await import("../db/schema.js");
+
+  // Freeze current model routing + presets as config snapshot
+  const [routes, providers, presets] = await Promise.all([
+    db.select().from(modelSceneRoutes),
+    db.select().from(modelProviders),
+    db.select().from(outputPresets),
+  ]);
+  const configSnapshot = JSON.stringify({ routes, providers: providers.map(p => ({ ...p, keyHint: p.keyHint })), presets });
+
+  const id = randomUUID();
+  const now = new Date();
+
+  await db.insert(generationTasks).values({
+    id,
+    productId,
+    analysisVersionId: body.analysisVersionId,
+    outputTypes: JSON.stringify(body.outputTypes),
+    configSnapshot,
+    currentStep: 1,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  const [row] = await db.select().from(generationTasks).where(eq(generationTasks.id, id));
+  return c.json(row, 201);
 });
 
 // ---------------------------------------------------------------------------

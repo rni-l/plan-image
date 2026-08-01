@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../db/index.js";
 import { backgroundJobs } from "../db/schema.js";
-import { eq, desc, inArray } from "drizzle-orm";
+import { eq, and, desc, inArray } from "drizzle-orm";
 
 export const jobsRouter = new Hono();
 
@@ -14,20 +14,30 @@ jobsRouter.get("/:id", async (c) => {
 });
 
 // GET /api/jobs?entityType=image_item&entityId=xxx
+// entityType alone returns all jobs of that type (max 200)
+// entityType+entityId returns jobs for a specific entity
 jobsRouter.get("/", async (c) => {
   const entityType = c.req.query("entityType");
-  const entityId = c.req.query("entityId");
+  const entityId   = c.req.query("entityId");
+
+  let whereClause;
+  if (entityType && entityId) {
+    whereClause = and(
+      eq(backgroundJobs.entityType, entityType),
+      eq(backgroundJobs.entityId, entityId)
+    );
+  } else if (entityType) {
+    whereClause = eq(backgroundJobs.entityType, entityType);
+  } else if (entityId) {
+    whereClause = eq(backgroundJobs.entityId, entityId);
+  }
 
   const rows = await db
     .select()
     .from(backgroundJobs)
-    .where(
-      entityType && entityId
-        ? inArray(backgroundJobs.entityId, [entityId])
-        : undefined
-    )
+    .where(whereClause)
     .orderBy(desc(backgroundJobs.createdAt))
-    .limit(100);
+    .limit(200);
 
   return c.json(rows);
 });

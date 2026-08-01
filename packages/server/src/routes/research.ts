@@ -50,12 +50,12 @@ researchRouter.post("/:productId/analyze", async (c) => {
   }
 
   // Next version number
-  const [{ maxVer }] = await db
+  const maxVerResult = await db
     .select({ maxVer: max(analysisVersions.versionNumber) })
     .from(analysisVersions)
     .where(eq(analysisVersions.productId, productId));
 
-  const versionNumber = (maxVer ?? 0) + 1;
+  const versionNumber = (maxVerResult[0]?.maxVer ?? 0) + 1;
   const versionId = randomUUID();
   const now = new Date();
 

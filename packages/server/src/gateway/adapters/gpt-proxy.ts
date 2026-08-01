@@ -8,7 +8,7 @@ import { readApiKey } from "../secrets.js";
  */
 export class GptProxyAdapter implements ModelAdapter {
   readonly providerName = "gpt_proxy";
-  readonly capabilities: ModelCapability[] = ["text", "vision", "image_gen"];
+  readonly capabilities: ModelCapability[] = ["text", "vision", "image_gen", "image_edit"];
 
   constructor(
     private readonly baseUrl: string,
@@ -18,6 +18,11 @@ export class GptProxyAdapter implements ModelAdapter {
   private get apiKey() { return readApiKey("gpt_proxy"); }
 
   async send(req: GatewayRequest): Promise<GatewayResponse> {
+    if (req.parameters?.["task_type"] === "image_gen") return this.imageGeneration(req);
+    return this.textCompletion(req);
+  }
+
+  private async textCompletion(req: GatewayRequest): Promise<GatewayResponse> {
     const model = req.model || this.defaultModel || "gpt-4o";
     const url = `${this.baseUrl.replace(/\/$/, "")}/v1/chat/completions`;
     const messages = buildMessages(req);
@@ -30,11 +35,7 @@ export class GptProxyAdapter implements ModelAdapter {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.apiKey}`,
         },
-        body: JSON.stringify({
-          model,
-          messages,
-          ...(req.parameters ?? {}),
-        }),
+        body: JSON.stringify({ model, messages, ...(req.parameters ?? {}) }),
         signal: AbortSignal.timeout(120_000),
       });
     } catch (err) {
@@ -48,7 +49,61 @@ export class GptProxyAdapter implements ModelAdapter {
     if (typeof text !== "string") {
       throw new GatewayError("invalid_response", "GPT中转返回了非预期的响应结构");
     }
-    return { text };
+    const u = data.usage;
+    return {
+      text,
+      ...(u
+        ? {
+            usage: {
+              promptTokens: u.prompt_tokens ?? 0,
+              completionTokens: u.completion_tokens ?? 0,
+              totalTokens: u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0),
+            },
+          }
+        : {}),
+    };
+  }
+
+  private async imageGeneration(req: GatewayRequest): Promise<GatewayResponse> {
+    const model = req.model || this.defaultModel || "dall-e-3";
+    const url = `${this.baseUrl.replace(/\/$/, "")}/v1/images/generations`;
+    const { task_type: _t, size, ...rest } = (req.parameters ?? {}) as Record<string, unknown>;
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          prompt: req.prompt,
+          n: 1,
+          size: size ?? "1024x1024",
+          response_format: "b64_json",
+          ...rest,
+        }),
+        signal: AbortSignal.timeout(180_000),
+      });
+    } catch (err) {
+      throw mapFetchError(err, "gpt_proxy");
+    }
+
+    if (!res.ok) await throwFromStatus(res, "gpt_proxy");
+
+    const data = (await res.json()) as { data?: Array<{ b64_json?: string; url?: string }> };
+    const first = data.data?.[0];
+    if (!first) throw new GatewayError("invalid_response", "GPT中转图片生成无返回数据");
+
+    if (first.b64_json) return { image: first.b64_json, imageMime: "image/png" };
+    if (first.url) {
+      const imgRes = await fetch(first.url);
+      const buf = Buffer.from(await imgRes.arrayBuffer());
+      return { image: buf.toString("base64"), imageMime: "image/png" };
+    }
+    throw new GatewayError("invalid_response", "GPT中转图片生成返回格式异常");
   }
 }
 
@@ -72,6 +127,7 @@ function buildMessages(req: GatewayRequest): unknown[] {
 interface OpenAIResponse {
   choices?: Array<{ message?: { content?: string } }>;
   error?: { message?: string };
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
 }
 
 async function throwFromStatus(res: Response, provider: string): Promise<never> {

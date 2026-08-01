@@ -1,11 +1,12 @@
 import { db } from "../db/index.js";
-import { modelProviders, modelSceneRoutes, type SceneKey } from "../db/schema.js";
+import { modelProviders, modelSceneRoutes, modelCallLogs, type SceneKey } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import type { ModelAdapter, GatewayRequest, GatewayResponse } from "./types.js";
 import { GatewayError } from "./types.js";
 import { BailianAdapter } from "./adapters/bailian.js";
 import { VolcengineAdapter } from "./adapters/volcengine.js";
 import { GptProxyAdapter } from "./adapters/gpt-proxy.js";
+import { randomUUID } from "node:crypto";
 
 // Adapter singletons — lazy-initialised per provider config
 const adapterCache = new Map<string, ModelAdapter>();
@@ -42,10 +43,13 @@ export function invalidateAdapterCache(): void {
 /**
  * Look up the configured route for a scene, validate capabilities, and send.
  * This is the primary entry point for all job handlers.
+ *
+ * @param jobId  Optional background_jobs.id to link in model_call_logs
  */
 export async function gatewayCall(
   scene: SceneKey,
-  req: Omit<GatewayRequest, "model">
+  req: Omit<GatewayRequest, "model">,
+  jobId?: string
 ): Promise<GatewayResponse> {
   // Load route from DB
   const [route] = await db
@@ -78,9 +82,51 @@ export async function gatewayCall(
   // Parse extra parameters from route config
   const extraParams = route.parameters ? (JSON.parse(route.parameters) as Record<string, unknown>) : {};
 
-  return adapter.send({
-    ...req,
+  const startMs = Date.now();
+  let result: GatewayResponse;
+  try {
+    result = await adapter.send({
+      ...req,
+      model: route.modelId,
+      parameters: { ...extraParams, ...(req.parameters ?? {}) },
+    });
+  } catch (err) {
+    // Write failed call log
+    const durationMs = Date.now() - startMs;
+    const ge = err instanceof GatewayError ? err : null;
+    await db.insert(modelCallLogs).values({
+      id: randomUUID(),
+      jobId: jobId ?? null,
+      scene,
+      provider: provider.name,
+      model: route.modelId,
+      status: "failed",
+      errorType: ge?.type ?? "unknown",
+      durationMs,
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+      createdAt: new Date(),
+    }).catch(() => { /* never let logging fail a job */ });
+    throw err;
+  }
+
+  // Write succeeded call log
+  const durationMs = Date.now() - startMs;
+  await db.insert(modelCallLogs).values({
+    id: randomUUID(),
+    jobId: jobId ?? null,
+    scene,
+    provider: provider.name,
     model: route.modelId,
-    parameters: { ...extraParams, ...(req.parameters ?? {}) },
-  });
+    status: "succeeded",
+    errorType: null,
+    durationMs,
+    promptTokens: result.usage?.promptTokens ?? null,
+    completionTokens: result.usage?.completionTokens ?? null,
+    totalTokens: result.usage?.totalTokens ?? null,
+    createdAt: new Date(),
+  }).catch(() => { /* never let logging fail a job */ });
+
+  return result;
 }

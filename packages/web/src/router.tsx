@@ -5,6 +5,8 @@ import { ProductWorkbench } from "./pages/products/ProductWorkbench.js";
 import { TaskWizard } from "./pages/tasks/TaskWizard.js";
 import { TaskCenterPage } from "./pages/task-center/TaskCenterPage.js";
 import { SettingsPage } from "./pages/settings/SettingsPage.js";
+import { LogsPage } from "./pages/logs/LogsPage.js";
+import { BillingPage } from "./pages/billing/BillingPage.js";
 
 export const router = createBrowserRouter([
   {
@@ -29,6 +31,10 @@ export const router = createBrowserRouter([
 
       // Task centre
       { path: "task-center", element: <TaskCenterPage /> },
+
+      // Logs & Billing
+      { path: "logs", element: <LogsPage /> },
+      { path: "billing", element: <BillingPage /> },
 
       // Settings
       { path: "settings", element: <Navigate to="/settings/models" replace /> },

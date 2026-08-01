@@ -12,6 +12,9 @@ import { researchRouter } from "./routes/research.js";
 import { tasksRouter } from "./routes/tasks.js";
 import { settingsRouter } from "./routes/settings.js";
 import { jobsRouter } from "./routes/jobs.js";
+import { logsRouter } from "./routes/logs.js";
+import { billingRouter } from "./routes/billing.js";
+import { requestLoggerMiddleware } from "./middleware/request-logger.js";
 import { recoverInterruptedJobs, startWorker, stopWorker } from "./jobs/worker.js";
 import { seedDefaults } from "./db/seed.js";
 import { registerAllHandlers } from "./jobs/register.js";
@@ -68,11 +71,15 @@ app.use("*", securityMiddleware);
 
 const api = new Hono();
 
+api.use("*", requestLoggerMiddleware);
+
 api.route("/products", productsRouter);
 api.route("/research", researchRouter);
 api.route("/tasks", tasksRouter);
 api.route("/settings", settingsRouter);
 api.route("/jobs", jobsRouter);
+api.route("/logs", logsRouter);
+api.route("/billing", billingRouter);
 
 api.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 

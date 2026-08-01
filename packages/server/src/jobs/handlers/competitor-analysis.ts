@@ -50,6 +50,7 @@ export async function handleCompetitorImageAnalysis(
 
   // Call vision model
   const response = await gatewayCall("competitor_image_analysis", {
+    scene: "competitor_image_analysis",
     prompt: USER_PROMPT,
     systemPrompt: SYSTEM_PROMPT,
     images: [imageBase64],

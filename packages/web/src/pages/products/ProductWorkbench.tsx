@@ -3,6 +3,7 @@ import { useParams, NavLink, Navigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { ProductInfoTab } from "./tabs/ProductInfoTab";
 import { ResearchTab } from "./tabs/ResearchTab";
+import { TasksTab } from "./tabs/TasksTab";
 
 interface Product {
   id: string;
@@ -72,7 +73,7 @@ export function ProductWorkbench() {
           <ResearchTab productId={productId!} />
         )}
         {tab === "tasks" && (
-          <div className="px-8 py-6 text-sm text-zinc-400">成图任务 — 待实现</div>
+          <TasksTab productId={productId!} />
         )}
       </div>
     </div>
