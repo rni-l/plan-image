@@ -291,6 +291,14 @@ export const modelCallLogs = sqliteTable("model_call_logs", {
   model: text("model").notNull(),
   status: text("status").notNull(), // 'succeeded' | 'failed'
   errorType: text("error_type"),
+  /** Full error message from the gateway — never contains API keys or request bodies */
+  errorMessage: text("error_message"),
+  /** Full prompt text sent to the model */
+  requestPrompt: text("request_prompt"),
+  /** JSON: parameters (images/mask replaced with size placeholders) */
+  requestParams: text("request_params"),
+  /** Response text, or "[image ~NKB]" for image models */
+  responseBody: text("response_body"),
   durationMs: integer("duration_ms"),
   promptTokens: integer("prompt_tokens"),
   completionTokens: integer("completion_tokens"),
@@ -308,6 +316,11 @@ export const apiRequestLogs = sqliteTable("api_request_logs", {
   id: text("id").primaryKey(),
   method: text("method").notNull(),
   path: text("path").notNull(),
+  queryString: text("query_string"),
+  /** Sanitized request body — base64 fields replaced with size placeholders */
+  requestBody: text("request_body"),
+  /** Response body text for non-2xx responses */
+  responseBody: text("response_body"),
   statusCode: integer("status_code"),
   durationMs: integer("duration_ms"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),

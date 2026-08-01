@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { Hono } from "hono";
 import { db } from "../db/index.js";
 import {
@@ -11,6 +13,7 @@ import {
 import { eq, desc, max } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { enqueueJob } from "../jobs/worker.js";
+import { paths } from "../lib/paths.js";
 
 export const tasksRouter = new Hono();
 
@@ -27,6 +30,106 @@ tasksRouter.get("/items/:itemId/versions", async (c) => {
     .where(eq(imageVersions.imageItemId, itemId))
     .orderBy(desc(imageVersions.createdAt));
   return c.json(versions);
+});
+
+// POST /api/tasks/items/:itemId/inpaint — create mask file + placeholder version + enqueue job
+tasksRouter.post("/items/:itemId/inpaint", async (c) => {
+  const itemId = c.req.param("itemId");
+
+  const body = await c.req.json<{
+    parentVersionId: string;
+    maskDataUrl: string;
+    instruction: string;
+  }>();
+
+  if (!body.parentVersionId || !body.maskDataUrl || !body.instruction?.trim()) {
+    return c.json({ error: "parentVersionId、maskDataUrl、instruction 均为必填" }, 400);
+  }
+  if (body.instruction.length > 500) {
+    return c.json({ error: "instruction 不能超过 500 字" }, 400);
+  }
+
+  // Verify parentVersion belongs to this item
+  const [parentVersion] = await db
+    .select()
+    .from(imageVersions)
+    .where(eq(imageVersions.id, body.parentVersionId));
+  if (!parentVersion || parentVersion.imageItemId !== itemId) {
+    return c.json({ error: "parentVersionId 不存在或不属于该图片项" }, 404);
+  }
+
+  // Decode and write mask file atomically
+  const b64 = body.maskDataUrl.includes(",")
+    ? body.maskDataUrl.split(",")[1]!
+    : body.maskDataUrl;
+  const maskBuffer = Buffer.from(b64, "base64");
+
+  const maskId = randomUUID();
+  const maskFilename = `${maskId}.png`;
+  const maskAbsolute = path.join(paths.masks, maskFilename);
+  const maskTmp = maskAbsolute + ".tmp";
+
+  await fs.promises.writeFile(maskTmp, maskBuffer);
+  await fs.promises.rename(maskTmp, maskAbsolute);
+
+  const maskRelative = path.join("assets", "masks", maskFilename);
+
+  // Create placeholder imageVersion
+  const versionId = randomUUID();
+  const now = new Date();
+  await db.insert(imageVersions).values({
+    id: versionId,
+    imageItemId: itemId,
+    filePath: "",
+    checksum: "",
+    generationType: "inpaint",
+    parentVersionId: body.parentVersionId,
+    jobId: null,
+    maskPath: maskRelative,
+    instruction: body.instruction.trim(),
+    isSelected: false,
+    createdAt: now,
+  });
+
+  // Enqueue image_edit job (entityType="image_item" so Step4 pollJobs can track it)
+  const jobId = await enqueueJob({
+    type: "image_edit",
+    entityType: "image_item",
+    entityId: itemId,
+    inputSnapshot: {
+      versionId,
+      parentVersionId: body.parentVersionId,
+      instruction: body.instruction.trim(),
+    },
+  });
+
+  return c.json({ jobId, versionId }, 201);
+});
+
+// PATCH /api/tasks/items/:itemId/versions/:versionId/select — switch selected version
+tasksRouter.patch("/items/:itemId/versions/:versionId/select", async (c) => {
+  const itemId = c.req.param("itemId");
+  const versionId = c.req.param("versionId");
+
+  const [ver] = await db
+    .select()
+    .from(imageVersions)
+    .where(eq(imageVersions.id, versionId));
+  if (!ver || ver.imageItemId !== itemId) {
+    return c.json({ error: "版本不存在或不属于该图片项" }, 404);
+  }
+
+  // Deselect all, then select the target
+  await db
+    .update(imageVersions)
+    .set({ isSelected: false })
+    .where(eq(imageVersions.imageItemId, itemId));
+  await db
+    .update(imageVersions)
+    .set({ isSelected: true })
+    .where(eq(imageVersions.id, versionId));
+
+  return c.body(null, 204);
 });
 
 // POST /api/tasks/items/:itemId/retry

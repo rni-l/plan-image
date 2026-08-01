@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
+import { RefreshCw, ChevronLeft, ChevronRight, ChevronDown, ChevronRight as ChevronRightIcon } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -12,6 +12,9 @@ interface ApiRequestLog {
   id: string;
   method: string;
   path: string;
+  queryString: string | null;
+  requestBody: string | null;
+  responseBody: string | null;
   statusCode: number | null;
   durationMs: number | null;
   createdAt: number;
@@ -25,6 +28,10 @@ interface LlmCallLog {
   model: string;
   status: string;
   errorType: string | null;
+  errorMessage: string | null;
+  requestPrompt: string | null;
+  requestParams: string | null;
+  responseBody: string | null;
   durationMs: number | null;
   promptTokens: number | null;
   completionTokens: number | null;
@@ -99,9 +106,10 @@ function ApiRequestsTab() {
   const [rows, setRows]   = useState<ApiRequestLog[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage]   = useState(1);
-  const [method, setMethod]   = useState("all");
-  const [status, setStatus]   = useState("all");
-  const [loading, setLoading] = useState(false);
+  const [method, setMethod]     = useState("all");
+  const [status, setStatus]     = useState("all");
+  const [loading, setLoading]   = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const LIMIT = 50;
 
   const load = useCallback(async () => {
@@ -162,6 +170,7 @@ function ApiRequestsTab() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b bg-zinc-50 text-xs text-zinc-500">
+              <th className="w-6 px-3 py-2" />
               <th className="px-3 py-2 text-left font-medium">时间</th>
               <th className="px-3 py-2 text-left font-medium">方法</th>
               <th className="px-3 py-2 text-left font-medium">路径</th>
@@ -171,16 +180,49 @@ function ApiRequestsTab() {
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={5} className="px-3 py-8 text-center text-xs text-zinc-400">暂无数据</td></tr>
+              <tr><td colSpan={6} className="px-3 py-8 text-center text-xs text-zinc-400">暂无数据</td></tr>
             )}
             {rows.map((r) => (
-              <tr key={r.id} className="border-b last:border-0 hover:bg-zinc-50/50">
-                <td className="px-3 py-2 text-xs text-zinc-500 whitespace-nowrap">{fmtTime(r.createdAt)}</td>
-                <td className="px-3 py-2"><MethodBadge method={r.method} /></td>
-                <td className="px-3 py-2 font-mono text-xs text-zinc-700 max-w-[320px] truncate">{r.path}</td>
-                <td className="px-3 py-2"><StatusBadge code={r.statusCode} /></td>
-                <td className="px-3 py-2 text-right text-xs text-zinc-500">{fmtDuration(r.durationMs)}</td>
-              </tr>
+              <>
+                <tr
+                  key={r.id}
+                  className="border-b cursor-pointer hover:bg-zinc-50/70"
+                  onClick={() => setExpandedId(expandedId === r.id ? null : r.id)}
+                >
+                  <td className="px-3 py-2 text-zinc-400">
+                    {expandedId === r.id
+                      ? <ChevronDown size={12} />
+                      : <ChevronRightIcon size={12} />}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-zinc-500 whitespace-nowrap">{fmtTime(r.createdAt)}</td>
+                  <td className="px-3 py-2"><MethodBadge method={r.method} /></td>
+                  <td className="px-3 py-2 font-mono text-xs text-zinc-700 max-w-[320px] truncate">
+                    {r.path}{r.queryString ?? ""}
+                  </td>
+                  <td className="px-3 py-2"><StatusBadge code={r.statusCode} /></td>
+                  <td className="px-3 py-2 text-right text-xs text-zinc-500">{fmtDuration(r.durationMs)}</td>
+                </tr>
+                {expandedId === r.id && (
+                  <tr key={`${r.id}-detail`} className="bg-zinc-50 border-b">
+                    <td colSpan={6} className="px-4 py-3">
+                      <div className="grid grid-cols-2 gap-3 text-xs">
+                        <div>
+                          <p className="mb-1 font-medium text-zinc-600">请求体</p>
+                          <pre className="max-h-60 overflow-auto rounded border border-zinc-200 bg-white p-2 text-zinc-700 whitespace-pre-wrap break-all">
+                            {r.requestBody ?? "（无请求体）"}
+                          </pre>
+                        </div>
+                        <div>
+                          <p className="mb-1 font-medium text-zinc-600">响应体{(r.statusCode ?? 0) < 400 ? "（仅记录错误响应）" : ""}</p>
+                          <pre className="max-h-60 overflow-auto rounded border border-zinc-200 bg-white p-2 text-zinc-700 whitespace-pre-wrap break-all">
+                            {r.responseBody ?? "—"}
+                          </pre>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </>
             ))}
           </tbody>
         </table>
@@ -209,6 +251,7 @@ function LlmCallsTab() {
   const [provider, setProvider] = useState("all");
   const [status, setStatus]     = useState("all");
   const [loading, setLoading]   = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const LIMIT = 50;
 
   const load = useCallback(async () => {
@@ -270,6 +313,7 @@ function LlmCallsTab() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b bg-zinc-50 text-xs text-zinc-500">
+              <th className="w-6 px-3 py-2" />
               <th className="px-3 py-2 text-left font-medium">时间</th>
               <th className="px-3 py-2 text-left font-medium">场景</th>
               <th className="px-3 py-2 text-left font-medium">供应商</th>
@@ -282,23 +326,72 @@ function LlmCallsTab() {
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={8} className="px-3 py-8 text-center text-xs text-zinc-400">暂无数据</td></tr>
+              <tr><td colSpan={9} className="px-3 py-8 text-center text-xs text-zinc-400">暂无数据</td></tr>
             )}
             {rows.map((r) => (
-              <tr key={r.id} className="border-b last:border-0 hover:bg-zinc-50/50">
-                <td className="px-3 py-2 text-xs text-zinc-500 whitespace-nowrap">{fmtTime(r.createdAt)}</td>
-                <td className="px-3 py-2 text-xs">{SCENE_LABELS[r.scene] ?? r.scene}</td>
-                <td className="px-3 py-2 text-xs">{PROVIDER_LABELS[r.provider] ?? r.provider}</td>
-                <td className="px-3 py-2 font-mono text-xs text-zinc-700 max-w-[160px] truncate">{r.model}</td>
-                <td className="px-3 py-2">
-                  <Badge variant={r.status === "succeeded" ? "succeeded" : "failed"} className="text-xs px-1.5 py-0">
-                    {r.status === "succeeded" ? "成功" : "失败"}
-                  </Badge>
-                </td>
-                <td className="px-3 py-2 text-right text-xs text-zinc-500">{fmtDuration(r.durationMs)}</td>
-                <td className="px-3 py-2 text-right text-xs text-zinc-500">{r.promptTokens?.toLocaleString() ?? "—"}</td>
-                <td className="px-3 py-2 text-right text-xs text-zinc-500">{r.completionTokens?.toLocaleString() ?? "—"}</td>
-              </tr>
+              <>
+                <tr
+                  key={r.id}
+                  className={`border-b cursor-pointer hover:bg-zinc-50/70 ${r.status === "failed" ? "bg-red-50/30" : ""}`}
+                  onClick={() => setExpandedId(expandedId === r.id ? null : r.id)}
+                >
+                  <td className="px-3 py-2 text-zinc-400">
+                    {expandedId === r.id
+                      ? <ChevronDown size={12} />
+                      : <ChevronRightIcon size={12} />}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-zinc-500 whitespace-nowrap">{fmtTime(r.createdAt)}</td>
+                  <td className="px-3 py-2 text-xs">{SCENE_LABELS[r.scene] ?? r.scene}</td>
+                  <td className="px-3 py-2 text-xs">{PROVIDER_LABELS[r.provider] ?? r.provider}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-zinc-700 max-w-[160px] truncate">{r.model}</td>
+                  <td className="px-3 py-2">
+                    <Badge variant={r.status === "succeeded" ? "succeeded" : "failed"} className="text-xs px-1.5 py-0">
+                      {r.status === "succeeded" ? "成功" : "失败"}
+                    </Badge>
+                  </td>
+                  <td className="px-3 py-2 text-right text-xs text-zinc-500">{fmtDuration(r.durationMs)}</td>
+                  <td className="px-3 py-2 text-right text-xs text-zinc-500">{r.promptTokens?.toLocaleString() ?? "—"}</td>
+                  <td className="px-3 py-2 text-right text-xs text-zinc-500">{r.completionTokens?.toLocaleString() ?? "—"}</td>
+                </tr>
+                {expandedId === r.id && (
+                  <tr key={`${r.id}-detail`} className="bg-zinc-50 border-b">
+                    <td colSpan={9} className="px-4 py-3">
+                      <div className="grid grid-cols-2 gap-3 text-xs">
+                        <div className="flex flex-col gap-2">
+                          <div>
+                            <p className="mb-1 font-medium text-zinc-600">Prompt（发送给模型的内容）</p>
+                            <pre className="max-h-72 overflow-auto rounded border border-zinc-200 bg-white p-2 text-zinc-700 whitespace-pre-wrap break-all">
+                              {r.requestPrompt ?? "—"}
+                            </pre>
+                          </div>
+                          <div>
+                            <p className="mb-1 font-medium text-zinc-600">请求参数</p>
+                            <pre className="max-h-36 overflow-auto rounded border border-zinc-200 bg-white p-2 text-zinc-700 whitespace-pre-wrap">
+                              {r.requestParams ?? "—"}
+                            </pre>
+                          </div>
+                        </div>
+                        <div className="flex flex-col gap-2">
+                          <div>
+                            <p className="mb-1 font-medium text-zinc-600">响应内容</p>
+                            <pre className="max-h-56 overflow-auto rounded border border-zinc-200 bg-white p-2 text-zinc-700 whitespace-pre-wrap break-all">
+                              {r.responseBody ?? "—"}
+                            </pre>
+                          </div>
+                          {r.errorMessage && (
+                            <div>
+                              <p className="mb-1 font-medium text-red-600">错误信息</p>
+                              <pre className="max-h-24 overflow-auto rounded border border-red-200 bg-red-50 p-2 text-red-700 whitespace-pre-wrap break-all">
+                                {r.errorMessage}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </>
             ))}
           </tbody>
         </table>

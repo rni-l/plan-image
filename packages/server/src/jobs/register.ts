@@ -3,6 +3,7 @@ import { handleCompetitorImageAnalysis } from "./handlers/competitor-analysis.js
 import { handleCompetitorSynthesis } from "./handlers/competitor-synthesis.js";
 import { handleDesignPlan } from "./handlers/design-plan.js";
 import { handleImageGeneration } from "./handlers/image-generation.js";
+import { handleImageEdit } from "./handlers/image-edit.js";
 
 /** Register all job handlers. Call once on server startup. */
 export function registerAllHandlers(): void {
@@ -10,5 +11,6 @@ export function registerAllHandlers(): void {
   registerHandler("competitor_synthesis",      handleCompetitorSynthesis);
   registerHandler("design_plan",               handleDesignPlan);
   registerHandler("image_generation",          handleImageGeneration);
-  // image_edit, export — registered when implemented
+  registerHandler("image_edit",                handleImageEdit);
+  // export — registered when implemented
 }

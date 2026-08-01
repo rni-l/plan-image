@@ -150,12 +150,14 @@ export class BailianAdapter implements ModelAdapter {
       throw new GatewayError("capability_not_supported", "图片编辑需要提供原图");
     }
 
-    const { task_type: _t, n, watermark, ...rest } =
+    const { task_type: _t, n, watermark, size, ...rest } =
       (req.parameters ?? {}) as Record<string, unknown>;
 
     const content: unknown[] = [
-      { image: `data:image/jpeg;base64,${req.images[0]}` },
-      ...(req.mask ? [{ image: `data:image/jpeg;base64,${req.mask}` }] : []),
+      { image: `data:${detectMimeFromBase64(req.images[0])};base64,${req.images[0]}` },
+      ...(req.mask
+        ? [{ image: `data:${detectMimeFromBase64(req.mask)};base64,${req.mask}` }]
+        : []),
       { text: req.prompt },
     ];
 
@@ -172,7 +174,12 @@ export class BailianAdapter implements ModelAdapter {
         body: JSON.stringify({
           model: req.model,
           input: { messages: [{ role: "user", content }] },
-          parameters: { n: n ?? 1, watermark: watermark ?? false, ...rest },
+          parameters: {
+            n: n ?? 1,
+            watermark: watermark ?? false,
+            ...(size ? { size: String(size).replace(/[xX]/, "*") } : {}),
+            ...rest,
+          },
         }),
         signal: AbortSignal.timeout(180_000),
       });
@@ -265,4 +272,17 @@ function mapFetchError(err: unknown, provider: string): GatewayError {
   const msg = err instanceof Error ? err.message : String(err);
   if (/timeout|abort/i.test(msg)) return new GatewayError("timeout", `${provider}: 请求超时`);
   return new GatewayError("unknown", `${provider}: ${msg}`);
+}
+
+/**
+ * Detect image MIME type from the first bytes of a base64-encoded binary.
+ * PNG magic bytes (89 50 4E 47) → b64 prefix "iVBOR"
+ * JPEG magic bytes (FF D8 FF)   → b64 prefix "/9j/"
+ * WEBP container (52 49 46 46)  → b64 prefix "UklG"
+ */
+function detectMimeFromBase64(b64: string): string {
+  if (b64.startsWith("iVBOR")) return "image/png";
+  if (b64.startsWith("/9j/"))  return "image/jpeg";
+  if (b64.startsWith("UklG"))  return "image/webp";
+  return "image/jpeg"; // safe fallback
 }

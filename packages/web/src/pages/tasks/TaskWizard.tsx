@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate, NavLink } from "react-router-dom";
 import {
   Loader2, ChevronRight, Check, Plus, X, GripVertical,
-  RefreshCw, ZoomIn, AlertCircle, Zap,
+  RefreshCw, ZoomIn, AlertCircle, Zap, Pencil,
 } from "lucide-react";
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors,
@@ -22,6 +22,7 @@ import { ImageLightbox } from "@/components/ui/image-lightbox";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogClose,
 } from "@/components/ui/dialog";
+import { InpaintEditor } from "./InpaintEditor";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -82,6 +83,7 @@ interface ImageVersion {
 
 interface Job {
   id: string;
+  type: string;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
   entityType: string | null;
   entityId: string | null;
@@ -401,6 +403,10 @@ function Step4({ task }: { task: GenerationTask }) {
   const [versions, setVersions] = useState<Record<string, ImageVersion[]>>({});
   const [generating, setGenerating] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [inpaintTarget, setInpaintTarget] = useState<{
+    item: ImageItem;
+    version: ImageVersion;
+  } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Load latest plan version for this task
@@ -490,6 +496,27 @@ function Step4({ task }: { task: GenerationTask }) {
     }
   }
 
+  async function handleSelectVersion(itemId: string, versionId: string) {
+    // Optimistic update first, then sync to server
+    setVersions((prev) => ({
+      ...prev,
+      [itemId]: (prev[itemId] ?? []).map((v) => ({ ...v, isSelected: v.id === versionId })),
+    }));
+    try {
+      await api.patch(`/tasks/items/${itemId}/versions/${versionId}/select`, {});
+    } catch {
+      toast.error("切换版本失败");
+      loadVersions(items).catch(() => {});
+    }
+  }
+
+  function handleInpaintSubmitted() {
+    // Ensure polling is running so Step 4 auto-updates when the inpaint job finishes
+    if (!pollRef.current) {
+      pollRef.current = setInterval(() => pollJobs(items), 3500);
+    }
+  }
+
   const anyGenerated = Object.values(versions).some(vs => vs.length > 0);
   const allDone = items.length > 0 && items.every(it => (versions[it.id]?.length ?? 0) > 0);
 
@@ -518,27 +545,47 @@ function Step4({ task }: { task: GenerationTask }) {
             const job = jobs[item.id];
             const itemVersions = versions[item.id] ?? [];
             const selected = itemVersions.find(v => v.isSelected) ?? itemVersions[0];
-            const isLoading = job?.status === "queued" || job?.status === "running";
-            const isFailed = job?.status === "failed" || job?.status === "interrupted";
+            const isLoading    = job?.status === "queued" || job?.status === "running";
+            const isFailed     = job?.status === "failed"  || job?.status === "interrupted";
+            const isInpainting = job?.type === "image_edit" && isLoading;
 
             return (
               <div key={item.id} className="flex flex-col overflow-hidden rounded-xl border border-zinc-100 bg-white">
                 {/* Image area */}
                 <div className="group relative aspect-square w-full overflow-hidden bg-zinc-50">
-                  {selected ? (
+                  {selected && selected.filePath ? (
                     <>
                       <img
                         src={`/api/products/assets/file?path=${encodeURIComponent(selected.filePath)}`}
                         alt={item.title}
-                        className="h-full w-full object-cover"
+                        className={`h-full w-full object-cover transition-opacity ${isInpainting ? "opacity-50" : ""}`}
                       />
-                      <button
-                        onClick={() => setLightboxSrc(`/api/products/assets/file?path=${encodeURIComponent(selected.filePath)}`)}
-                        className="absolute right-2 top-2 rounded bg-white/80 p-1 opacity-0 shadow-sm transition-opacity hover:bg-white group-hover:opacity-100"
-                      >
-                        <ZoomIn size={13} className="text-zinc-500" />
-                      </button>
-                    </>
+                      {/* Inpaint-in-progress overlay */}
+                      {isInpainting && (
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <div className="flex items-center gap-1.5 rounded-full bg-zinc-900/85 px-3 py-1.5 text-xs text-white shadow-lg">
+                            <Loader2 size={12} className="animate-spin" />
+                            微调中…
+                          </div>
+                        </div>
+                      )}
+                      <div className="absolute right-2 top-2 flex gap-1">
+                        <button
+                          onClick={() => setInpaintTarget({ item, version: selected })}
+                          className="rounded bg-white/80 p-1 opacity-0 shadow-sm transition-opacity hover:bg-white group-hover:opacity-100"
+                          title="局部微调"
+                        >
+                          <Pencil size={13} className="text-zinc-500" />
+                        </button>
+                        <button
+                          onClick={() => setLightboxSrc(`/api/products/assets/file?path=${encodeURIComponent(selected.filePath)}`)}
+                          className="rounded bg-white/80 p-1 opacity-0 shadow-sm transition-opacity hover:bg-white group-hover:opacity-100"
+                          title="放大查看"
+                        >
+                          <ZoomIn size={13} className="text-zinc-500" />
+                        </button>
+                      </div>
+</>
                   ) : isLoading ? (
                     <div className="flex h-full flex-col items-center justify-center gap-2 text-zinc-400">
                       <Loader2 size={22} className="animate-spin" />
@@ -573,7 +620,22 @@ function Step4({ task }: { task: GenerationTask }) {
                       </button>
                     )}
                     {selected && itemVersions.length > 1 && (
-                      <span className="text-xs text-zinc-400">v{itemVersions.length}</span>
+                      <div className="flex items-center gap-0.5">
+                        {[...itemVersions].reverse().map((v, i) => (
+                          <button
+                            key={v.id}
+                            title={v.generationType === "inpaint" ? `微调 v${i + 1}` : `生成 v${i + 1}`}
+                            onClick={() => handleSelectVersion(item.id, v.id)}
+                            className={`rounded px-1 py-0.5 text-[10px] leading-none transition-colors ${
+                              v.isSelected
+                                ? "bg-zinc-900 text-white"
+                                : "border border-zinc-200 text-zinc-400 hover:border-zinc-400"
+                            }`}
+                          >
+                            v{i + 1}
+                          </button>
+                        ))}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -583,6 +645,16 @@ function Step4({ task }: { task: GenerationTask }) {
         </div>
       )}
 
+      {inpaintTarget && (
+        <InpaintEditor
+          itemId={inpaintTarget.item.id}
+          itemTitle={inpaintTarget.item.title}
+          version={inpaintTarget.version}
+          open
+          onClose={() => setInpaintTarget(null)}
+          onSubmitted={handleInpaintSubmitted}
+        />
+      )}
       <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
     </div>
   );

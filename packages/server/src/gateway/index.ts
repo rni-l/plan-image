@@ -40,6 +40,19 @@ export function invalidateAdapterCache(): void {
   adapterCache.clear();
 }
 
+/** Build a loggable params string — replaces binary blobs with size placeholders. */
+function buildRequestParams(req: Omit<GatewayRequest, "model">): string {
+  const out: Record<string, unknown> = { parameters: req.parameters ?? {} };
+  if (req.systemPrompt) out.systemPrompt = req.systemPrompt;
+  if (req.images?.length) {
+    out.images = req.images.map((b, i) =>
+      `[image ${i + 1}: ~${Math.round(b.length * 0.75 / 1024)}KB]`
+    );
+  }
+  if (req.mask) out.mask = `[mask: ~${Math.round(req.mask.length * 0.75 / 1024)}KB]`;
+  return JSON.stringify(out, null, 2);
+}
+
 /**
  * Look up the configured route for a scene, validate capabilities, and send.
  * This is the primary entry point for all job handlers.
@@ -51,7 +64,6 @@ export async function gatewayCall(
   req: Omit<GatewayRequest, "model">,
   jobId?: string
 ): Promise<GatewayResponse> {
-  // Load route from DB
   const [route] = await db
     .select()
     .from(modelSceneRoutes)
@@ -91,7 +103,6 @@ export async function gatewayCall(
       parameters: { ...extraParams, ...(req.parameters ?? {}) },
     });
   } catch (err) {
-    // Write failed call log
     const durationMs = Date.now() - startMs;
     const ge = err instanceof GatewayError ? err : null;
     await db.insert(modelCallLogs).values({
@@ -102,17 +113,24 @@ export async function gatewayCall(
       model: route.modelId,
       status: "failed",
       errorType: ge?.type ?? "unknown",
+      errorMessage: ge?.message ?? (err instanceof Error ? err.message : String(err)),
+      requestPrompt: req.prompt,
+      requestParams: buildRequestParams(req),
+      responseBody: null,
       durationMs,
       promptTokens: null,
       completionTokens: null,
       totalTokens: null,
       createdAt: new Date(),
-    }).catch(() => { /* never let logging fail a job */ });
+    }).catch(() => {});
     throw err;
   }
 
-  // Write succeeded call log
   const durationMs = Date.now() - startMs;
+  const responseBodyLog = result.image
+    ? `[image: ~${Math.round(result.image.length * 0.75 / 1024)}KB]`
+    : (result.text ?? null);
+
   await db.insert(modelCallLogs).values({
     id: randomUUID(),
     jobId: jobId ?? null,
@@ -121,12 +139,16 @@ export async function gatewayCall(
     model: route.modelId,
     status: "succeeded",
     errorType: null,
+    errorMessage: null,
+    requestPrompt: req.prompt,
+    requestParams: buildRequestParams(req),
+    responseBody: responseBodyLog,
     durationMs,
     promptTokens: result.usage?.promptTokens ?? null,
     completionTokens: result.usage?.completionTokens ?? null,
     totalTokens: result.usage?.totalTokens ?? null,
     createdAt: new Date(),
-  }).catch(() => { /* never let logging fail a job */ });
+  }).catch(() => {});
 
   return result;
 }
