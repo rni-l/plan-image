@@ -1,0 +1,6 @@
+.superpowers/
+.data/
+exports/
+.env
+.env.*
+!.env.example
