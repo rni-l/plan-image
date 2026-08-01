@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate, NavLink } from "react-router-dom";
 import {
   Loader2, ChevronRight, Check, Plus, X, GripVertical,
-  RefreshCw, ZoomIn, AlertCircle, Zap, Pencil,
+  RefreshCw, ZoomIn, AlertCircle, Zap, Pencil, Download, Rows2,
 } from "lucide-react";
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors,
@@ -584,6 +584,15 @@ function Step4({ task }: { task: GenerationTask }) {
                         >
                           <ZoomIn size={13} className="text-zinc-500" />
                         </button>
+                        <a
+                          href={`/api/products/assets/file?path=${encodeURIComponent(selected.filePath)}`}
+                          download={`${item.title || "image"}.jpg`}
+                          className="rounded bg-white/80 p-1 opacity-0 shadow-sm transition-opacity hover:bg-white group-hover:opacity-100"
+                          title="下载此图"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <Download size={13} className="text-zinc-500" />
+                        </a>
                       </div>
 </>
                   ) : isLoading ? (
@@ -645,6 +654,11 @@ function Step4({ task }: { task: GenerationTask }) {
         </div>
       )}
 
+      {/* Export toolbar — shown when all items have at least one generated image */}
+      {allDone && planVersionId && (
+        <ExportToolbar taskId={task.id} planVersionId={planVersionId} items={items} />
+      )}
+
       {inpaintTarget && (
         <InpaintEditor
           itemId={inpaintTarget.item.id}
@@ -663,6 +677,48 @@ function Step4({ task }: { task: GenerationTask }) {
 // Helper — also used by Step2
 function parseDirection(json: string): DirectionContent {
   try { return JSON.parse(json) as DirectionContent; } catch { return {}; }
+}
+
+// ---------------------------------------------------------------------------
+// Export toolbar — appears below Step 4 grid when all images are generated
+// ---------------------------------------------------------------------------
+
+function ExportToolbar({
+  taskId,
+  planVersionId,
+  items,
+}: {
+  taskId: string;
+  planVersionId: string;
+  items: ImageItem[];
+}) {
+  const hasDetailPages = items.some((it) => it.listType === "detail_page");
+  const zipUrl    = `/api/tasks/${taskId}/export/zip?planVersionId=${planVersionId}`;
+  const stitchUrl = `/api/tasks/${taskId}/export/stitch?planVersionId=${planVersionId}`;
+
+  return (
+    <div className="mt-6 flex items-center gap-3 rounded-lg border border-zinc-100 bg-zinc-50 px-4 py-3">
+      <p className="text-sm font-medium text-zinc-700">导出</p>
+      <div className="ml-auto flex gap-2">
+        <a
+          href={zipUrl}
+          download="images-export.zip"
+          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50"
+        >
+          <Download size={13} /> 打包下载 (ZIP)
+        </a>
+        {hasDetailPages && (
+          <a
+            href={stitchUrl}
+            download="detail-stitch.jpg"
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50"
+          >
+            <Rows2 size={13} /> 拼接详情页
+          </a>
+        )}
+      </div>
+    </div>
+  );
 }
 
 

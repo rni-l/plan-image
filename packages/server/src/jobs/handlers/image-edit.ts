@@ -17,6 +17,21 @@ export interface ImageEditInput {
   instruction: string;
 }
 
+/**
+ * Wrap a raw user instruction into a structured edit prompt for image models.
+ * The wrapper clarifies scope (masked region only), quality expectations, and
+ * consistency constraints so the model avoids unintended global changes.
+ */
+function buildEditPrompt(instruction: string): string {
+  return `请对图片中遮罩标注的区域进行如下修改：${instruction}
+
+编辑要求：
+- 仅修改遮罩覆盖的区域，保持其他区域完全不变
+- 修改后的区域与周围内容在光线、色调、材质上自然融合
+- 保持整体构图风格和产品主体不受影响
+- 输出专业电商图片品质，细节清晰，无明显接缝或不协调感`;
+}
+
 export async function handleImageEdit(
   jobId: string,
   inputRaw: unknown
@@ -58,7 +73,7 @@ export async function handleImageEdit(
       width?: number;
       height?: number;
     };
-    width = preset.width ?? 1000;
+    width  = preset.width  ?? 1000;
     height = preset.height ?? 1000;
   } catch { /* use defaults */ }
 
@@ -87,11 +102,11 @@ export async function handleImageEdit(
   const maskB64 = maskBuf.toString("base64");
 
   // -------------------------------------------------------------------------
-  // 6. Call gateway image_edit
+  // 6. Call gateway image_edit with wrapped prompt
   // -------------------------------------------------------------------------
   const response = await gatewayCall("image_edit", {
     scene: "image_edit",
-    prompt: input.instruction,
+    prompt: buildEditPrompt(input.instruction),
     images: [sourceB64],
     mask: maskB64,
     parameters: {

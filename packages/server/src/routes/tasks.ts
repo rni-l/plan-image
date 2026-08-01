@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { Hono } from "hono";
 import { db } from "../db/index.js";
 import {
@@ -9,13 +11,57 @@ import {
   imageItems,
   imageVersions,
   outputPresets,
+  products,
 } from "../db/schema.js";
-import { eq, desc, max } from "drizzle-orm";
+import { eq, desc, max, lt, and, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { enqueueJob } from "../jobs/worker.js";
-import { paths } from "../lib/paths.js";
+import { paths, assetPath } from "../lib/paths.js";
+
+const execFileAsync = promisify(execFile);
 
 export const tasksRouter = new Hono();
+
+// ---------------------------------------------------------------------------
+// GET /api/tasks — cross-product task list (task center)
+// ---------------------------------------------------------------------------
+tasksRouter.get("/", async (c) => {
+  const stepFilter = c.req.query("step"); // "active" (step<4) | "done" (step=4)
+  const page  = Math.max(1, Number(c.req.query("page")  ?? "1"));
+  const LIMIT = 30;
+  const offset = (page - 1) * LIMIT;
+
+  const conds: ReturnType<typeof eq>[] = [];
+  if (stepFilter === "active") conds.push(lt(generationTasks.currentStep, 4));
+  if (stepFilter === "done")   conds.push(eq(generationTasks.currentStep, 4));
+  const where = conds.length > 0 ? and(...conds) : undefined;
+
+  const [rows, totals] = await Promise.all([
+    db
+      .select({
+        id:          generationTasks.id,
+        productId:   generationTasks.productId,
+        productName: products.name,
+        outputTypes: generationTasks.outputTypes,
+        currentStep: generationTasks.currentStep,
+        createdAt:   generationTasks.createdAt,
+        updatedAt:   generationTasks.updatedAt,
+      })
+      .from(generationTasks)
+      .innerJoin(products, eq(generationTasks.productId, products.id))
+      .where(where)
+      .orderBy(desc(generationTasks.updatedAt))
+      .limit(LIMIT)
+      .offset(offset),
+    db
+      .select({ total: sql<number>`count(*)` })
+      .from(generationTasks)
+      .innerJoin(products, eq(generationTasks.productId, products.id))
+      .where(where),
+  ]);
+
+  return c.json({ data: rows, total: totals[0]?.total ?? 0, page });
+});
 
 // ---------------------------------------------------------------------------
 // Item-scoped routes — must be registered BEFORE /:taskId to avoid conflicts
@@ -146,6 +192,130 @@ tasksRouter.post("/items/:itemId/retry", async (c) => {
   });
 
   return c.json({ jobId }, 201);
+});
+
+// ---------------------------------------------------------------------------
+// Export routes  (must be before /:taskId to avoid shadowing)
+// ---------------------------------------------------------------------------
+
+// GET /api/tasks/:taskId/export/zip?planVersionId=xxx
+// Bundles all selected image versions into a zip and streams it back.
+tasksRouter.get("/:taskId/export/zip", async (c) => {
+  const planVersionId = c.req.query("planVersionId");
+  if (!planVersionId) return c.json({ error: "planVersionId required" }, 400);
+
+  const items = await db
+    .select()
+    .from(imageItems)
+    .where(eq(imageItems.designPlanVersionId, planVersionId))
+    .orderBy(imageItems.listType, imageItems.sortOrder);
+
+  if (items.length === 0) return c.json({ error: "No items in plan" }, 404);
+
+  // Resolve each item to its selected (or latest) version path
+  const filePaths: string[] = [];
+  for (const item of items) {
+    const vs = await db
+      .select()
+      .from(imageVersions)
+      .where(eq(imageVersions.imageItemId, item.id))
+      .orderBy(desc(imageVersions.createdAt));
+    const selected = vs.find((v) => v.isSelected) ?? vs[0];
+    if (selected?.filePath) filePaths.push(assetPath(selected.filePath));
+  }
+
+  if (filePaths.length === 0) return c.json({ error: "No generated images" }, 404);
+
+  const zipId = randomUUID();
+  const zipAbsPath = path.join(paths.exports, `export-${zipId}.zip`);
+
+  try {
+    // -j: junk directory names so the zip contains flat files
+    await execFileAsync("/usr/bin/zip", ["-j", zipAbsPath, ...filePaths]);
+    const buffer = await fs.promises.readFile(zipAbsPath);
+    return new Response(new Uint8Array(buffer), {
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="images-export.zip"`,
+        "Content-Length": String(buffer.byteLength),
+      },
+    });
+  } finally {
+    fs.promises.unlink(zipAbsPath).catch(() => {});
+  }
+});
+
+// GET /api/tasks/:taskId/export/stitch?planVersionId=xxx
+// Vertically stitches all detail_page selected images into one tall JPEG.
+tasksRouter.get("/:taskId/export/stitch", async (c) => {
+  const planVersionId = c.req.query("planVersionId");
+  if (!planVersionId) return c.json({ error: "planVersionId required" }, 400);
+
+  const items = await db
+    .select()
+    .from(imageItems)
+    .where(eq(imageItems.designPlanVersionId, planVersionId))
+    .orderBy(imageItems.sortOrder);
+
+  const detailItems = items.filter((it) => it.listType === "detail_page");
+  if (detailItems.length === 0)
+    return c.json({ error: "No detail_page items in plan" }, 404);
+
+  // Collect absolute paths for selected versions
+  const absFilePaths: string[] = [];
+  for (const item of detailItems) {
+    const vs = await db
+      .select()
+      .from(imageVersions)
+      .where(eq(imageVersions.imageItemId, item.id))
+      .orderBy(desc(imageVersions.createdAt));
+    const selected = vs.find((v) => v.isSelected) ?? vs[0];
+    if (selected?.filePath) absFilePaths.push(assetPath(selected.filePath));
+  }
+
+  if (absFilePaths.length === 0)
+    return c.json({ error: "No generated detail page images" }, 404);
+
+  const sharp = (await import("sharp")).default;
+
+  // Determine target width (widest image wins)
+  const metadatas = await Promise.all(absFilePaths.map((fp) => sharp(fp).metadata()));
+  const targetWidth = Math.max(...metadatas.map((m) => m.width ?? 800));
+
+  // Resize each image to targetWidth, collect buffers + heights
+  const frames: Array<{ buf: Buffer; h: number }> = [];
+  for (let i = 0; i < absFilePaths.length; i++) {
+    const meta = metadatas[i]!;
+    const aspectRatio = (meta.height ?? 800) / (meta.width ?? 800);
+    const newHeight = Math.round(targetWidth * aspectRatio);
+    const buf = await sharp(absFilePaths[i]!).resize(targetWidth, newHeight).toBuffer();
+    frames.push({ buf, h: newHeight });
+  }
+
+  const totalHeight = frames.reduce((s, f) => s + f.h, 0);
+
+  // Build composite instruction list
+  let yOffset = 0;
+  const composites = frames.map(({ buf, h }) => {
+    const c = { input: buf, top: yOffset, left: 0 };
+    yOffset += h;
+    return c;
+  });
+
+  const stitched = await sharp({
+    create: { width: targetWidth, height: totalHeight, channels: 3, background: { r: 255, g: 255, b: 255 } },
+  })
+    .composite(composites)
+    .jpeg({ quality: 90 })
+    .toBuffer();
+
+  return new Response(new Uint8Array(stitched), {
+    headers: {
+      "Content-Type": "image/jpeg",
+      "Content-Disposition": `attachment; filename="detail-stitch.jpg"`,
+      "Content-Length": String(stitched.byteLength),
+    },
+  });
 });
 
 // ---------------------------------------------------------------------------

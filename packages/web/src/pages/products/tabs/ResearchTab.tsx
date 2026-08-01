@@ -256,6 +256,21 @@ export function ResearchTab({ productId }: { productId: string }) {
 // Analysis card
 // ---------------------------------------------------------------------------
 
+/** Convert any field value to a display string, handling nested objects gracefully. */
+function fieldValueToString(key: string, val: unknown): string {
+  if (val === null || val === undefined) return "";
+  if (typeof val === "string") return val;
+  // colors: { palette, mood }
+  if (key === "colors" && typeof val === "object" && !Array.isArray(val)) {
+    const c = val as Record<string, unknown>;
+    const parts = [c["palette"], c["mood"]].filter(Boolean);
+    return parts.length > 0 ? parts.join(" · ") : JSON.stringify(val);
+  }
+  if (Array.isArray(val)) return val.join("；");
+  if (typeof val === "object") return JSON.stringify(val);
+  return String(val);
+}
+
 function AnalysisCard({
   card,
   asset,
@@ -268,17 +283,18 @@ function AnalysisCard({
   const [editOpen, setEditOpen] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const effective = card.humanOverride
-    ? (JSON.parse(card.humanOverride) as Record<string, string>)
-    : (JSON.parse(card.modelOutput) as Record<string, string>);
+    ? (JSON.parse(card.humanOverride) as Record<string, unknown>)
+    : (JSON.parse(card.modelOutput) as Record<string, unknown>);
   const isOverridden = !!card.humanOverride;
-  const isEmpty = !effective || Object.keys(effective).length === 0 || effective["raw"];
+  const isEmpty = !effective || Object.keys(effective).length === 0 || !!effective["raw"];
   const imgUrl = asset
     ? `/api/products/assets/file?path=${encodeURIComponent(asset.filePath)}`
     : null;
 
   const FIELD_LABELS: Record<string, string> = {
-    layout: "版式", colors: "配色", copy: "文案",
-    selling_points: "卖点", scene: "场景", techniques: "手法",
+    layout: "版式", colors: "配色", typography: "字体",
+    copy: "文案", selling_points: "卖点", scene: "场景",
+    techniques: "手法", emotional_appeal: "情感", strengths: "亮点",
   };
 
   return (
@@ -321,10 +337,12 @@ function AnalysisCard({
             {Object.entries(FIELD_LABELS).map(([key, label]) => {
               const val = effective[key];
               if (!val) return null;
+              const display = fieldValueToString(key, val);
+              if (!display) return null;
               return (
                 <div key={key} className="flex gap-1.5 text-xs leading-relaxed">
                   <span className="w-8 shrink-0 text-zinc-400">{label}</span>
-                  <span className="text-zinc-700 line-clamp-2">{val}</span>
+                  <span className="text-zinc-700 line-clamp-2">{display}</span>
                 </div>
               );
             })}
@@ -364,15 +382,22 @@ function OverrideDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
   card: AnalysisCard;
-  effective: Record<string, string>;
+  effective: Record<string, unknown>;
   fieldLabels: Record<string, string>;
   onSaved: (c: AnalysisCard) => void;
 }) {
+  // Draft stores everything as strings for textarea editing; objects are serialised.
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (open) setDraft({ ...effective });
+    if (open) {
+      const stringified: Record<string, string> = {};
+      for (const [k, v] of Object.entries(effective)) {
+        stringified[k] = fieldValueToString(k, v);
+      }
+      setDraft(stringified);
+    }
   }, [open, effective]);
 
   async function handleSave() {
