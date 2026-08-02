@@ -3,6 +3,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import { db } from "../db/index.js";
 import {
   generationTasks,
@@ -17,6 +18,9 @@ import { eq, desc, max, lt, and, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { enqueueJob } from "../jobs/worker.js";
 import { paths, assetPath } from "../lib/paths.js";
+import { gatewayStream, gatewayTextStream } from "../gateway/index.js";
+import { loadPromptContext } from "../lib/image-prompt.js";
+import { saveImageAsset } from "../lib/storage.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -194,6 +198,96 @@ tasksRouter.post("/items/:itemId/retry", async (c) => {
   return c.json({ jobId }, 201);
 });
 
+// GET /api/tasks/items/:itemId/generate-stream
+// SSE endpoint — streams progressive image frames while generating, then saves the result.
+tasksRouter.get("/items/:itemId/generate-stream", (c) => {
+  const itemId = c.req.param("itemId");
+
+  return streamSSE(c, async (stream) => {
+    try {
+      // Verify item exists before opening the stream
+      const [item] = await db.select().from(imageItems).where(eq(imageItems.id, itemId));
+      if (!item) {
+        await stream.writeSSE({
+          data: JSON.stringify({ type: "error", message: "图片项不存在" }),
+          event: "message",
+        });
+        return;
+      }
+
+      const ctx = await loadPromptContext(itemId);
+      let lastB64 = "";
+
+      // Stream progressive frames from the model, passing the product photo as reference
+      for await (const chunk of gatewayStream("image_generation", {
+        scene: "image_generation",
+        prompt: ctx.prompt,
+        ...(ctx.productImageBase64 ? { images: [ctx.productImageBase64] } : {}),
+        parameters: {
+          task_type: "image_gen",
+          size: `${ctx.width}x${ctx.height}`,
+          n: 1,
+        },
+      })) {
+        lastB64 = chunk.b64;
+        await stream.writeSSE({
+          data: JSON.stringify({ type: "progress", b64: chunk.b64 }),
+          event: "message",
+        });
+        if (chunk.done) break;
+      }
+
+      // Persist the final frame as a new image version
+      if (lastB64) {
+        const buffer = Buffer.from(lastB64, "base64");
+        const assetId = randomUUID();
+        const saved = await saveImageAsset(buffer, assetId, "generated");
+        const now = new Date();
+
+        await db
+          .update(imageVersions)
+          .set({ isSelected: false })
+          .where(eq(imageVersions.imageItemId, itemId));
+
+        await db.insert(imageVersions).values({
+          id: assetId,
+          imageItemId: itemId,
+          filePath: saved.relativePath,
+          checksum: saved.checksum,
+          generationType: "initial",
+          parentVersionId: null,
+          jobId: null,
+          maskPath: null,
+          instruction: null,
+          isSelected: true,
+          createdAt: now,
+        });
+
+        await db
+          .update(imageItems)
+          .set({ updatedAt: now })
+          .where(eq(imageItems.id, itemId));
+
+        await stream.writeSSE({
+          data: JSON.stringify({ type: "done", versionId: assetId }),
+          event: "message",
+        });
+      } else {
+        await stream.writeSSE({
+          data: JSON.stringify({ type: "error", message: "模型未返回图片数据" }),
+          event: "message",
+        });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await stream.writeSSE({
+        data: JSON.stringify({ type: "error", message }),
+        event: "message",
+      });
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Export routes  (must be before /:taskId to avoid shadowing)
 // ---------------------------------------------------------------------------
@@ -366,7 +460,185 @@ tasksRouter.patch("/:taskId/step", async (c) => {
   return c.body(null, 204);
 });
 
-// POST /api/tasks/:taskId/generate-directions — enqueue design_plan job
+// GET /api/tasks/:taskId/generate-directions-stream — SSE: analyse images + stream LLM output + save directions
+tasksRouter.get("/:taskId/generate-directions-stream", (c) => {
+  const taskId = c.req.param("taskId");
+
+  return streamSSE(c, async (stream) => {
+    const emit = async (event: Record<string, unknown>) => {
+      await stream.writeSSE({ data: JSON.stringify(event), event: "message" });
+    };
+
+    try {
+      // ── 1. Load task ──────────────────────────────────────────────────
+      const [task] = await db.select().from(generationTasks).where(eq(generationTasks.id, taskId));
+      if (!task) { await emit({ type: "error", message: "任务不存在" }); return; }
+
+      // Mark task as step 2
+      await db.update(generationTasks)
+        .set({ currentStep: 2, updatedAt: new Date() })
+        .where(eq(generationTasks.id, taskId));
+
+      // ── 2. Delete any stale directions for this task ───────────────────
+      await db.delete(designDirections).where(eq(designDirections.generationTaskId, taskId));
+
+      // ── 3. Analyse product images ─────────────────────────────────────
+      const { productAssets, productSpecifications, sellingPoints,
+              analysisVersions: analysisVersionsTable, synthesisReports,
+              imageAnalysisCards } = await import("../db/schema.js");
+      const { analyseAndPersistAsset } = await import("../lib/product-analysis.js");
+
+      const rawAssets = await db.select().from(productAssets)
+        .where(eq(productAssets.productId, task.productId))
+        .orderBy(productAssets.sortOrder);
+
+      await emit({ type: "step", text: `正在分析商品图片（${rawAssets.length} 张）…` });
+
+      const assets = await Promise.all(rawAssets.map(async (a, i) => {
+        const parsedAnalysis = await analyseAndPersistAsset(a);
+        await emit({ type: "step", text: `商品图片 ${i + 1}/${rawAssets.length} 分析完成` });
+        return { ...a, parsedAnalysis };
+      }));
+
+      // ── 4. Build context for the design-plan prompt ───────────────────
+      const [product] = await db.select().from(products).where(eq(products.id, task.productId));
+      const [specs, points] = await Promise.all([
+        db.select().from(productSpecifications).where(eq(productSpecifications.productId, task.productId)),
+        db.select().from(sellingPoints).where(eq(sellingPoints.productId, task.productId)),
+      ]);
+
+      const outputTypes: string[] = JSON.parse(task.outputTypes);
+      const validAssetIds = assets.map(a => a.id);
+
+      const productImageCtx = assets.length > 0
+        ? assets.map((a, i) => {
+            const d = a.parsedAnalysis;
+            const desc = d
+              ? [d["appearance"], d["colors"] ? `颜色：${d["colors"]}` : "",
+                 d["materials"] ? `材质：${d["materials"]}` : "",
+                 d["keyFeatures"] ? `视觉特征：${d["keyFeatures"]}` : "",
+                 d["style"] ? `风格：${d["style"]}` : ""].filter(Boolean).join("；")
+              : "（图片分析失败）";
+            return `  图片${i + 1}（ID: ${a.id}）: ${desc}`;
+          }).join("\n")
+        : "  暂无商品图片";
+
+      // Synthesis / competitor analysis
+      const [synthesisRow] = await db.select().from(synthesisReports)
+        .where(eq(synthesisReports.analysisVersionId, task.analysisVersionId));
+      let synthesisContent = "";
+      if (synthesisRow) {
+        try {
+          const p = JSON.parse(synthesisRow.content) as Record<string, unknown>;
+          const lines: string[] = [];
+          const patterns = p["industry_patterns"];
+          if (Array.isArray(patterns)) {
+            lines.push("行业共性规律：");
+            (patterns as Array<{ pattern?: string; logic?: string }>).slice(0, 3)
+              .forEach((x, i) => { if (x.pattern) lines.push(`  ${i + 1}. ${x.pattern}${x.logic ? `（${x.logic}）` : ""}`); });
+          }
+          const opps = p["differentiation_opportunities"];
+          if (Array.isArray(opps)) {
+            lines.push("差异化机会：");
+            (opps as Array<{ opportunity?: string; how_to_apply?: string }>).slice(0, 3)
+              .forEach((x, i) => { if (x.opportunity) lines.push(`  ${i + 1}. ${x.opportunity}${x.how_to_apply ? ` → ${x.how_to_apply}` : ""}`); });
+          }
+          synthesisContent = lines.join("\n");
+        } catch { /* ignore */ }
+      }
+      if (!synthesisContent) {
+        const [version] = await db.select().from(analysisVersionsTable)
+          .where(eq(analysisVersionsTable.id, task.analysisVersionId));
+        if (version) {
+          const cards = await db.select().from(imageAnalysisCards)
+            .where(eq(imageAnalysisCards.analysisVersionId, version.id));
+          if (cards.length > 0) {
+            synthesisContent = `竞品图片分析（${cards.length}张）：\n` +
+              cards.slice(0, 5).map((c, i) => {
+                const d = JSON.parse(c.humanOverride ?? c.modelOutput) as Record<string, unknown>;
+                return `图${i + 1}: 版式=${d["layout"] ?? ""}，色彩=${
+                  typeof d["colors"] === "object"
+                    ? (d["colors"] as Record<string, string>)?.palette ?? ""
+                    : d["colors"] ?? ""}，情感=${d["emotional_appeal"] ?? ""}`;
+              }).join("\n");
+          }
+        }
+      }
+
+      const productCtx = `商品名称：${product?.name ?? "未知"}\n规格参数：${specs.map(s => `${s.label}=${s.value}`).join("，") || "暂无"}\n核心卖点：${points.map(p => p.content).join("；") || "暂无"}`;
+      const outputTypeLabel = outputTypes.includes("main_image") && outputTypes.includes("detail_page")
+        ? "主图 + 详情页" : outputTypes.includes("main_image") ? "主图" : "详情页";
+      const imagesPerDirection = outputTypes.length > 1
+        ? "2-3张主图（listType: main_image）和2-3张详情页图（listType: detail_page）"
+        : outputTypes[0] === "main_image" ? "3-4张主图（listType: main_image）" : "3-4张详情页图（listType: detail_page）";
+      const assetIdNote = validAssetIds.length > 0
+        ? `可用的商品图片ID列表：${validAssetIds.join("、")}。每张图必须从这个列表中选择一个productAssetId。`
+        : "暂无商品图片，productAssetId填null。";
+
+      const prompt = `请为以下商品设计3个差异化的视觉方向，用于生成${outputTypeLabel}图片。\n3个方向之间需有明显差异，例如：极简高端、温暖生活场景、数据驱动专业风。\n\n【商品信息】\n${productCtx}\n\n【商品图片视觉分析】\n${productImageCtx}\n\n【竞品分析洞察】\n${synthesisContent || "暂无竞品分析数据，请基于商品特性自行判断"}\n\n${assetIdNote}\n\n输出格式（严格JSON，只包含directions数组）：\n{\n  "directions": [\n    {\n      "label": "方向A — 简短主题名（6字以内）",\n      "positioning": "核心定位和目标受众（2-3句话）",\n      "colorScheme": "完整配色方案（主色+辅色+点缀色）",\n      "layoutIntent": "版式和构图策略",\n      "copyStrategy": "文案风格和主要卖点侧重",\n      "imageList": [\n        {\n          "listType": "main_image",\n          "productAssetId": "使用哪张商品图片的ID",\n          "title": "图片标题（8字以内）",\n          "description": "图片核心内容（30字以内）",\n          "sellingPoints": ["卖点1", "卖点2", "卖点3"],\n          "suggestedCopy": "建议主标题文案（10-15字）",\n          "compositionIntent": "详细构图描述",\n          "lighting": "完整光照方案",\n          "angle": "精确拍摄视角",\n          "background": "背景详细描述",\n          "mood": "视觉情绪描述（3-6个形容词）",\n          "visualElements": "画面中所有视觉元素清单"\n        }\n      ]\n    }\n  ]\n}\n\n要求：每个方向生成${imagesPerDirection}；只输出JSON`;
+
+      const SYSTEM_PROMPT = `你是一位顶级的电商视觉创意总监，擅长将商品特性与竞品洞察转化为可落地执行的视觉方案。请基于提供的商品信息和竞品分析，生成3个差异化设计方向，以严格的JSON格式输出，不包含任何其他内容。每个方向的图片列表需要包含非常丰富的视觉细节，以便直接驱动AI图片生成。`;
+
+      // ── 5. Stream LLM output ──────────────────────────────────────────
+      await emit({ type: "step", text: "正在生成设计方向，AI 思考中…" });
+
+      let fullText = "";
+      for await (const chunk of gatewayTextStream("design_plan", {
+        scene: "design_plan",
+        prompt,
+        systemPrompt: SYSTEM_PROMPT,
+      })) {
+        if (chunk.text) {
+          fullText += chunk.text;
+          await emit({ type: "token", text: chunk.text });
+        }
+        if (chunk.done) break;
+      }
+
+      // ── 6. Parse and save directions ──────────────────────────────────
+      await emit({ type: "step", text: "解析设计方向并保存…" });
+
+      const match = fullText.match(/\{[\s\S]*\}/);
+      let directions: Array<{ label: string; content: string }> = [];
+      try {
+        const parsed = JSON.parse(match?.[0] ?? fullText) as {
+          directions?: Array<{ label?: string; [key: string]: unknown }>;
+        };
+        if (Array.isArray(parsed.directions)) {
+          const now = new Date();
+          for (const dir of parsed.directions.slice(0, 3)) {
+            await db.insert(designDirections).values({
+              id: randomUUID(),
+              generationTaskId: taskId,
+              label: dir.label ?? "未命名方向",
+              content: JSON.stringify(dir),
+              createdAt: now,
+            });
+          }
+          directions = parsed.directions.slice(0, 3).map(d => ({
+            label: d.label ?? "未命名方向",
+            content: JSON.stringify(d),
+          }));
+        }
+      } catch {
+        await emit({ type: "error", message: "设计方向解析失败，模型返回格式错误，请重试" });
+        return;
+      }
+
+      if (directions.length === 0) {
+        await emit({ type: "error", message: "设计方向生成失败，未能解析到方向数据，请重试" });
+        return;
+      }
+
+      await emit({ type: "done" });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await stream.writeSSE({ data: JSON.stringify({ type: "error", message }), event: "message" });
+    }
+  });
+});
+
+// POST /api/tasks/:taskId/generate-directions — enqueue design_plan job (kept for backward-compat)
 tasksRouter.post("/:taskId/generate-directions", async (c) => {
   const taskId = c.req.param("taskId");
   const [task] = await db.select().from(generationTasks).where(eq(generationTasks.id, taskId));
@@ -424,6 +696,12 @@ tasksRouter.post("/:taskId/plan", async (c) => {
       sellingPoints?: string[];
       suggestedCopy?: string;
       compositionIntent?: string;
+      lighting?: string;
+      angle?: string;
+      background?: string;
+      mood?: string;
+      visualElements?: string;
+      productAssetId?: string | null;
       presetId: string;
     }>;
   }>();
@@ -464,6 +742,12 @@ tasksRouter.post("/:taskId/plan", async (c) => {
       sellingPoints: item.sellingPoints ? JSON.stringify(item.sellingPoints) : null,
       suggestedCopy: item.suggestedCopy ?? null,
       compositionIntent: item.compositionIntent ?? null,
+      lighting: item.lighting ?? null,
+      angle: item.angle ?? null,
+      background: item.background ?? null,
+      mood: item.mood ?? null,
+      visualElements: item.visualElements ?? null,
+      productAssetId: item.productAssetId ?? null,
       referenceAssetIds: null,
       outputPresetSnapshot: presetSnapshot,
       createdAt: now,

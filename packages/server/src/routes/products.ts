@@ -236,6 +236,27 @@ productsRouter.patch("/:id/assets/reorder", async (c) => {
   return c.body(null, 204);
 });
 
+// POST /api/products/:id/assets/:assetId/analyse — trigger vision analysis for one asset
+productsRouter.post("/:id/assets/:assetId/analyse", async (c) => {
+  const assetId = c.req.param("assetId");
+  const body = (await c.req.json<{ force?: boolean }>().catch(() => null)) ?? {};
+  const force = "force" in body ? (body.force ?? false) : false;
+
+  const [asset] = await db.select().from(productAssets).where(eq(productAssets.id, assetId));
+  if (!asset) return c.json({ error: "Not found" }, 404);
+
+  const { analyseAndPersistAsset } = await import("../lib/product-analysis.js");
+  const result = await analyseAndPersistAsset(asset, force);
+
+  if (!result) {
+    return c.json({ error: "图片分析失败，请检查视觉模型配置" }, 502);
+  }
+
+  // Return updated asset row
+  const [updated] = await db.select().from(productAssets).where(eq(productAssets.id, assetId));
+  return c.json(updated);
+});
+
 // DELETE /api/products/:id/assets/:assetId
 productsRouter.delete("/:id/assets/:assetId", async (c) => {
   const assetId = c.req.param("assetId");

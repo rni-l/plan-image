@@ -36,7 +36,7 @@ export class GptProxyAdapter implements ModelAdapter {
           Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify({ model, messages, ...(req.parameters ?? {}) }),
-        signal: AbortSignal.timeout(120_000),
+        signal: AbortSignal.timeout(360_000),
       });
     } catch (err) {
       throw mapFetchError(err, "gpt_proxy");
@@ -85,7 +85,7 @@ export class GptProxyAdapter implements ModelAdapter {
           response_format: "b64_json",
           ...rest,
         }),
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(720_000),
       });
     } catch (err) {
       throw mapFetchError(err, "gpt_proxy");

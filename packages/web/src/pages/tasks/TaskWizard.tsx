@@ -111,34 +111,73 @@ const STEPS = [
 ] as const;
 
 // ---------------------------------------------------------------------------
-// Step 2 — poll for directions, display cards, user selects one
+// Step 2 — SSE: stream progress + LLM output → display direction cards
 // ---------------------------------------------------------------------------
 
 function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
   const [directions, setDirections] = useState<DesignDirection[]>([]);
-  const [loading, setLoading] = useState(true);
+  /** null = streaming in progress; "done" = completed; string = error message */
+  const [streamState, setStreamState] = useState<null | "done" | string>(null);
+  const [steps, setSteps] = useState<string[]>([]);
+  const [tokenBuffer, setTokenBuffer] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sourceRef = useRef<EventSource | null>(null);
+  const tokenEndRef = useRef<HTMLDivElement | null>(null);
 
-  const loadDirections = useCallback(async () => {
-    const data = await api.get<{ directions: DesignDirection[] }>(`/tasks/${task.id}`);
-    if (data.directions.length > 0) {
-      setDirections(data.directions);
-      setLoading(false);
-      stopPolling();
-    }
+  // Auto-scroll token stream to bottom
+  useEffect(() => {
+    tokenEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [tokenBuffer]);
+
+  const startStream = useCallback(() => {
+    // Clean up previous connection if any
+    sourceRef.current?.close();
+    setStreamState(null);
+    setSteps([]);
+    setTokenBuffer("");
+    setDirections([]);
+
+    const src = new EventSource(`/api/tasks/${task.id}/generate-directions-stream`);
+    sourceRef.current = src;
+
+    src.onmessage = (e: MessageEvent<string>) => {
+      let payload: { type: string; text?: string; message?: string };
+      try { payload = JSON.parse(e.data) as typeof payload; } catch { return; }
+
+      if (payload.type === "step" && payload.text) {
+        setSteps((prev) => [...prev, payload.text!]);
+      } else if (payload.type === "token" && payload.text) {
+        setTokenBuffer((prev) => prev + payload.text);
+      } else if (payload.type === "done") {
+        src.close();
+        sourceRef.current = null;
+        // Fetch directions from DB now that they're saved
+        api.get<{ directions: DesignDirection[] }>(`/tasks/${task.id}`)
+          .then((data) => {
+            setDirections(data.directions);
+            setStreamState("done");
+          })
+          .catch(() => setStreamState("加载设计方向失败，请刷新重试"));
+      } else if (payload.type === "error") {
+        src.close();
+        sourceRef.current = null;
+        setStreamState(payload.message ?? "生成失败，请重试");
+      }
+    };
+
+    src.onerror = () => {
+      src.close();
+      sourceRef.current = null;
+      setStreamState("连接中断，请点击重试");
+    };
   }, [task.id]);
 
-  function stopPolling() {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-  }
-
+  // Start stream on mount
   useEffect(() => {
-    loadDirections().catch(() => {});
-    pollRef.current = setInterval(() => loadDirections().catch(() => {}), 3000);
-    return () => stopPolling();
-  }, [loadDirections]);
+    startStream();
+    return () => { sourceRef.current?.close(); };
+  }, [startStream]);
 
   async function handleNext() {
     if (!selectedId) return;
@@ -152,19 +191,68 @@ function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
     }
   }
 
-  if (loading) {
+  // ── Error state ────────────────────────────────────────────────────────────
+  if (typeof streamState === "string" && streamState !== "done") {
     return (
       <div className="flex flex-col items-center gap-4 py-24 text-zinc-400">
-        <Loader2 size={28} className="animate-spin" />
-        <p className="text-sm">AI 正在生成设计方向，通常需要30-60秒…</p>
+        <AlertCircle size={28} className="text-red-400" />
+        <p className="text-sm text-red-500">{streamState}</p>
+        <Button variant="outline" size="sm" onClick={startStream}>
+          <RefreshCw size={13} /> 重新生成
+        </Button>
       </div>
     );
   }
 
+  // ── Streaming / loading state ──────────────────────────────────────────────
+  if (streamState === null) {
+    return (
+      <div className="flex flex-col gap-4 px-8 py-6">
+        {/* Step progress */}
+        <div className="flex flex-col gap-1.5">
+          {steps.map((s, i) => (
+            <div key={i} className="flex items-center gap-2 text-sm text-zinc-500">
+              <Check size={13} className="shrink-0 text-emerald-500" />
+              {s}
+            </div>
+          ))}
+          {steps.length > 0 && (
+            <div className="flex items-center gap-2 text-sm text-zinc-400">
+              <Loader2 size={13} className="shrink-0 animate-spin" />
+              {steps.length < 2 ? "等待分析完成…" : "AI 正在思考…"}
+            </div>
+          )}
+          {steps.length === 0 && (
+            <div className="flex items-center gap-2 text-sm text-zinc-400">
+              <Loader2 size={13} className="shrink-0 animate-spin" />
+              正在初始化…
+            </div>
+          )}
+        </div>
+
+        {/* LLM token stream */}
+        {tokenBuffer && (
+          <div className="max-h-56 overflow-y-auto rounded-lg bg-zinc-950 p-3">
+            <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-emerald-400">
+              {tokenBuffer}
+            </pre>
+            <div ref={tokenEndRef} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Done: show direction cards ─────────────────────────────────────────────
   return (
     <div className="px-8 py-6">
       <div className="mb-5 flex items-center justify-between">
-        <h2 className="text-sm font-medium text-zinc-900">选择设计方向</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-sm font-medium text-zinc-900">选择设计方向</h2>
+          <Button variant="outline" size="sm" onClick={startStream}>
+            <RefreshCw size={12} /> 重新生成
+          </Button>
+        </div>
         <Button size="sm" onClick={handleNext} disabled={!selectedId || saving}>
           {saving ? <><Loader2 size={13} className="animate-spin" /> 保存中</> : <>编辑方案 <ChevronRight size={13} /></>}
         </Button>
@@ -220,6 +308,7 @@ function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
     </div>
   );
 }
+
 
 // ---------------------------------------------------------------------------
 // Step 3 — editable image list, confirm dialog, create plan
@@ -409,6 +498,11 @@ function Step4({ task }: { task: GenerationTask }) {
   } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Streaming state — maps itemId → current preview b64 / whether streaming is active
+  const [streamPreviews, setStreamPreviews] = useState<Record<string, string>>({});
+  const [streamingIds, setStreamingIds] = useState<Set<string>>(new Set());
+  const streamSourcesRef = useRef<Record<string, EventSource>>({});
+
   // Load latest plan version for this task
   useEffect(() => {
     api.get<{ planVersions: Array<{ id: string }> }>(`/tasks/${task.id}`)
@@ -468,7 +562,11 @@ function Step4({ task }: { task: GenerationTask }) {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
   }
 
-  useEffect(() => () => stopPolling(), []);
+  // Close all open SSE connections on unmount
+  useEffect(() => () => {
+    stopPolling();
+    Object.values(streamSourcesRef.current).forEach((s) => s.close());
+  }, []);
 
   async function handleGenerate() {
     if (!planVersionId || items.length === 0) return;
@@ -517,6 +615,79 @@ function Step4({ task }: { task: GenerationTask }) {
     }
   }
 
+  /** Start a streaming (re)generation for a single item via SSE. */
+  function startStream(itemId: string) {
+    // Close any existing stream for this item
+    if (streamSourcesRef.current[itemId]) {
+      streamSourcesRef.current[itemId]!.close();
+      delete streamSourcesRef.current[itemId];
+    }
+
+    setStreamingIds((prev) => new Set([...prev, itemId]));
+    setStreamPreviews((prev) => ({ ...prev, [itemId]: "" }));
+
+    const source = new EventSource(`/api/tasks/items/${itemId}/generate-stream`);
+    streamSourcesRef.current[itemId] = source;
+
+    source.onmessage = (e: MessageEvent<string>) => {
+      const payload = JSON.parse(e.data) as {
+        type: "progress" | "done" | "error";
+        b64?: string;
+        versionId?: string;
+        message?: string;
+      };
+
+      if (payload.type === "progress" && payload.b64) {
+        setStreamPreviews((prev) => ({ ...prev, [itemId]: payload.b64! }));
+      } else if (payload.type === "done") {
+        source.close();
+        delete streamSourcesRef.current[itemId];
+        setStreamingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(itemId);
+          return next;
+        });
+        setStreamPreviews((prev) => {
+          const next = { ...prev };
+          delete next[itemId];
+          return next;
+        });
+        // Reload versions to show the newly saved image
+        loadVersions(items).catch(() => {});
+      } else if (payload.type === "error") {
+        source.close();
+        delete streamSourcesRef.current[itemId];
+        setStreamingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(itemId);
+          return next;
+        });
+        setStreamPreviews((prev) => {
+          const next = { ...prev };
+          delete next[itemId];
+          return next;
+        });
+        toast.error(payload.message ?? "生成失败");
+      }
+    };
+
+    source.onerror = () => {
+      source.close();
+      delete streamSourcesRef.current[itemId];
+      setStreamingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(itemId);
+        return next;
+      });
+      setStreamPreviews((prev) => {
+        const next = { ...prev };
+        delete next[itemId];
+        return next;
+      });
+      toast.error("连接中断，请重试");
+    };
+  }
+
   const anyGenerated = Object.values(versions).some(vs => vs.length > 0);
   const allDone = items.length > 0 && items.every(it => (versions[it.id]?.length ?? 0) > 0);
 
@@ -545,15 +716,38 @@ function Step4({ task }: { task: GenerationTask }) {
             const job = jobs[item.id];
             const itemVersions = versions[item.id] ?? [];
             const selected = itemVersions.find(v => v.isSelected) ?? itemVersions[0];
-            const isLoading    = job?.status === "queued" || job?.status === "running";
-            const isFailed     = job?.status === "failed"  || job?.status === "interrupted";
+            const isStreaming   = streamingIds.has(item.id);
+            const streamPreview = streamPreviews[item.id];
+            const isLoading    = !isStreaming && (job?.status === "queued" || job?.status === "running");
+            const isFailed     = !isStreaming && (job?.status === "failed"  || job?.status === "interrupted");
             const isInpainting = job?.type === "image_edit" && isLoading;
 
             return (
               <div key={item.id} className="flex flex-col overflow-hidden rounded-xl border border-zinc-100 bg-white">
                 {/* Image area */}
                 <div className="group relative aspect-square w-full overflow-hidden bg-zinc-50">
-                  {selected && selected.filePath ? (
+                  {/* Streaming: show progressive preview */}
+                  {isStreaming ? (
+                    <>
+                      {streamPreview ? (
+                        <img
+                          src={`data:image/jpeg;base64,${streamPreview}`}
+                          alt={item.title}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-full flex-col items-center justify-center gap-2 text-zinc-400">
+                          <Loader2 size={22} className="animate-spin" />
+                        </div>
+                      )}
+                      <div className="absolute inset-0 flex items-end justify-center pb-3 pointer-events-none">
+                        <div className="flex items-center gap-1.5 rounded-full bg-zinc-900/80 px-3 py-1.5 text-xs text-white shadow-lg">
+                          <Loader2 size={11} className="animate-spin" />
+                          渲染中…
+                        </div>
+                      </div>
+                    </>
+                  ) : selected && selected.filePath ? (
                     <>
                       <img
                         src={`/api/products/assets/file?path=${encodeURIComponent(selected.filePath)}`}
@@ -570,6 +764,14 @@ function Step4({ task }: { task: GenerationTask }) {
                         </div>
                       )}
                       <div className="absolute right-2 top-2 flex gap-1">
+                        {/* Click image to regenerate via streaming */}
+                        <button
+                          onClick={() => startStream(item.id)}
+                          className="rounded bg-white/80 p-1 opacity-0 shadow-sm transition-opacity hover:bg-white group-hover:opacity-100"
+                          title="重新生成"
+                        >
+                          <RefreshCw size={13} className="text-zinc-500" />
+                        </button>
                         <button
                           onClick={() => setInpaintTarget({ item, version: selected })}
                           className="rounded bg-white/80 p-1 opacity-0 shadow-sm transition-opacity hover:bg-white group-hover:opacity-100"
@@ -594,7 +796,7 @@ function Step4({ task }: { task: GenerationTask }) {
                           <Download size={13} className="text-zinc-500" />
                         </a>
                       </div>
-</>
+                    </>
                   ) : isLoading ? (
                     <div className="flex h-full flex-col items-center justify-center gap-2 text-zinc-400">
                       <Loader2 size={22} className="animate-spin" />
@@ -619,16 +821,16 @@ function Step4({ task }: { task: GenerationTask }) {
                     <p className="text-xs text-zinc-400">{item.listType === "main_image" ? "主图" : "详情页"}</p>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
-                    {isFailed && (
+                    {isFailed && !isStreaming && (
                       <button
-                        onClick={() => handleRetry(item.id)}
+                        onClick={() => startStream(item.id)}
                         className="flex items-center gap-1 rounded-md border border-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50"
                         title={job?.errorMessage ?? "重试"}
                       >
                         <RefreshCw size={11} /> 重试
                       </button>
                     )}
-                    {selected && itemVersions.length > 1 && (
+                    {selected && itemVersions.length > 1 && !isStreaming && (
                       <div className="flex items-center gap-0.5">
                         {[...itemVersions].reverse().map((v, i) => (
                           <button

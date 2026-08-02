@@ -1,4 +1,4 @@
-import type { ModelAdapter, GatewayRequest, GatewayResponse, ModelCapability } from "../types.js";
+import type { ModelAdapter, GatewayRequest, GatewayResponse, ModelCapability, TextStreamChunk } from "../types.js";
 import { GatewayError } from "../types.js";
 import { readApiKey } from "../secrets.js";
 
@@ -44,7 +44,7 @@ export class BailianAdapter implements ModelAdapter {
             messages,
             ...(req.parameters ?? {}),
           }),
-          signal: AbortSignal.timeout(120_000),
+          signal: AbortSignal.timeout(360_000),
         }
       );
     } catch (err) {
@@ -70,6 +70,75 @@ export class BailianAdapter implements ModelAdapter {
           }
         : {}),
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Text streaming (OpenAI-compatible SSE)
+  // ---------------------------------------------------------------------------
+
+  async *sendTextStream(req: GatewayRequest): AsyncGenerator<TextStreamChunk> {
+    const messages = buildChatMessages(req);
+    let res: Response;
+    try {
+      res = await fetch(
+        `${BAILIAN_BASE}/compatible-mode/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: req.model,
+            messages,
+            stream: true,
+            ...(req.parameters ?? {}),
+          }),
+          signal: AbortSignal.timeout(360_000),
+        }
+      );
+    } catch (err) {
+      throw mapFetchError(err, "bailian");
+    }
+    if (!res.ok) await throwFromStatus(res, "bailian");
+    if (!res.body) throw new GatewayError("invalid_response", "bailian: 流式响应无 body");
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const lines = buf.split("\n");
+        buf = lines.pop()!;
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === "data: [DONE]") {
+            if (trimmed === "data: [DONE]") { yield { text: "", done: true }; return; }
+            continue;
+          }
+          if (!trimmed.startsWith("data: ")) continue;
+
+          let chunk: { choices?: Array<{ delta?: { content?: string }; finish_reason?: string | null }> };
+          try { chunk = JSON.parse(trimmed.slice(6)) as typeof chunk; } catch { continue; }
+
+          const delta = chunk.choices?.[0]?.delta?.content;
+          if (delta) yield { text: delta, done: false };
+          if (chunk.choices?.[0]?.finish_reason === "stop") {
+            yield { text: "", done: true };
+            return;
+          }
+        }
+      }
+      yield { text: "", done: true };
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -111,7 +180,7 @@ export class BailianAdapter implements ModelAdapter {
             ...rest,
           },
         }),
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(720_000),
       });
     } catch (err) {
       throw mapFetchError(err, "bailian");
@@ -132,7 +201,7 @@ export class BailianAdapter implements ModelAdapter {
     const raw = imgEntry.image;
     // raw may be a URL or inline base64 / data-URI
     if (raw.startsWith("http://") || raw.startsWith("https://")) {
-      const imgRes = await fetch(raw, { signal: AbortSignal.timeout(60_000) });
+      const imgRes = await fetch(raw, { signal: AbortSignal.timeout(360_000) });
       const buf = Buffer.from(await imgRes.arrayBuffer());
       return { image: buf.toString("base64"), imageMime: "image/jpeg" };
     }
@@ -181,7 +250,7 @@ export class BailianAdapter implements ModelAdapter {
             ...rest,
           },
         }),
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(720_000),
       });
     } catch (err) {
       throw mapFetchError(err, "bailian");
@@ -197,7 +266,7 @@ export class BailianAdapter implements ModelAdapter {
 
     const raw = imgEntry.image;
     if (raw.startsWith("http://") || raw.startsWith("https://")) {
-      const imgRes = await fetch(raw, { signal: AbortSignal.timeout(60_000) });
+      const imgRes = await fetch(raw, { signal: AbortSignal.timeout(360_000) });
       const buf = Buffer.from(await imgRes.arrayBuffer());
       return { image: buf.toString("base64"), imageMime: "image/jpeg" };
     }

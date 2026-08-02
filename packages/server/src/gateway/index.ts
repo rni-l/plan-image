@@ -1,12 +1,14 @@
 import { db } from "../db/index.js";
 import { modelProviders, modelSceneRoutes, modelCallLogs, type SceneKey } from "../db/schema.js";
 import { eq } from "drizzle-orm";
-import type { ModelAdapter, GatewayRequest, GatewayResponse } from "./types.js";
+import type { ModelAdapter, GatewayRequest, GatewayResponse, ImageStreamChunk, TextStreamChunk } from "./types.js";
 import { GatewayError } from "./types.js";
 import { BailianAdapter } from "./adapters/bailian.js";
 import { VolcengineAdapter } from "./adapters/volcengine.js";
 import { GptProxyAdapter } from "./adapters/gpt-proxy.js";
 import { randomUUID } from "node:crypto";
+
+export type { TextStreamChunk };
 
 // Adapter singletons — lazy-initialised per provider config
 const adapterCache = new Map<string, ModelAdapter>();
@@ -131,6 +133,12 @@ export async function gatewayCall(
     ? `[image: ~${Math.round(result.image.length * 0.75 / 1024)}KB]`
     : (result.text ?? null);
 
+  // Prefer the adapter-provided actual sent body for accurate logging;
+  // fall back to the raw gateway params when the adapter doesn't supply it.
+  const loggedParams = result._sentBody
+    ? JSON.stringify(result._sentBody, null, 2)
+    : buildRequestParams(req);
+
   await db.insert(modelCallLogs).values({
     id: randomUUID(),
     jobId: jobId ?? null,
@@ -141,7 +149,7 @@ export async function gatewayCall(
     errorType: null,
     errorMessage: null,
     requestPrompt: req.prompt,
-    requestParams: buildRequestParams(req),
+    requestParams: loggedParams,
     responseBody: responseBodyLog,
     durationMs,
     promptTokens: result.usage?.promptTokens ?? null,
@@ -151,4 +159,113 @@ export async function gatewayCall(
   }).catch(() => {});
 
   return result;
+}
+
+/**
+ * Streaming text variant — yields text delta chunks as the model outputs them.
+ * Currently only VolcengineAdapter supports sendTextStream; others fall back to
+ * a single-chunk wrapper around send().
+ */
+export async function* gatewayTextStream(
+  scene: SceneKey,
+  req: Omit<GatewayRequest, "model">
+): AsyncGenerator<TextStreamChunk> {
+  const [route] = await db
+    .select()
+    .from(modelSceneRoutes)
+    .where(eq(modelSceneRoutes.scene, scene));
+
+  if (!route?.providerId || !route.modelId) {
+    throw new GatewayError(
+      "capability_not_supported",
+      `场景 "${scene}" 尚未配置模型，请在设置页完成路由配置`
+    );
+  }
+
+  const [provider] = await db
+    .select()
+    .from(modelProviders)
+    .where(eq(modelProviders.id, route.providerId));
+
+  if (!provider?.isConfigured) {
+    throw new GatewayError(
+      "authentication_failed",
+      `供应商 "${provider?.name ?? route.providerId}" 未配置 API 密钥`
+    );
+  }
+
+  const adapter = buildAdapter(provider.name, provider.baseUrl, route.modelId);
+  const extraParams = route.parameters
+    ? (JSON.parse(route.parameters) as Record<string, unknown>)
+    : {};
+
+  const fullReq: GatewayRequest = {
+    ...req,
+    model: route.modelId,
+    parameters: { ...extraParams, ...(req.parameters ?? {}) },
+  };
+
+  if (adapter.sendTextStream) {
+    yield* adapter.sendTextStream(fullReq);
+  } else {
+    // Non-streaming fallback: use gatewayCall so the request gets properly logged
+    const result = await gatewayCall(scene, req);
+    if (result.text) {
+      yield { text: result.text, done: true };
+    } else {
+      throw new GatewayError("invalid_response", "模型未返回文本内容");
+    }
+  }
+}
+
+export async function* gatewayStream(
+  scene: SceneKey,
+  req: Omit<GatewayRequest, "model">
+): AsyncGenerator<ImageStreamChunk> {
+  const [route] = await db
+    .select()
+    .from(modelSceneRoutes)
+    .where(eq(modelSceneRoutes.scene, scene));
+
+  if (!route?.providerId || !route.modelId) {
+    throw new GatewayError(
+      "capability_not_supported",
+      `场景 "${scene}" 尚未配置模型，请在设置页完成路由配置`
+    );
+  }
+
+  const [provider] = await db
+    .select()
+    .from(modelProviders)
+    .where(eq(modelProviders.id, route.providerId));
+
+  if (!provider?.isConfigured) {
+    throw new GatewayError(
+      "authentication_failed",
+      `供应商 "${provider?.name ?? route.providerId}" 未配置 API 密钥`
+    );
+  }
+
+  const adapter = buildAdapter(provider.name, provider.baseUrl, route.modelId);
+  const extraParams = route.parameters
+    ? (JSON.parse(route.parameters) as Record<string, unknown>)
+    : {};
+
+  const fullReq: GatewayRequest = {
+    ...req,
+    model: route.modelId,
+    parameters: { ...extraParams, ...(req.parameters ?? {}) },
+  };
+
+  if (adapter.sendStream) {
+    yield* adapter.sendStream(fullReq);
+  } else {
+    // Non-streaming fallback: single chunk on completion
+    const result = await adapter.send(fullReq);
+    if (result.image) {
+      yield { b64: result.image, done: true };
+    } else {
+      throw new GatewayError("invalid_response", "模型不支持流式渲染且未返回图片");
+    }
+  }
 }
