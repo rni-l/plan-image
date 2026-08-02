@@ -34,10 +34,19 @@ billingRouter.get("/summary", async (c) => {
   // Compute estimated cost via joined pricing
   const costRows = await db
     .select({
-      promptTokens:          sql<number>`coalesce(sum(l.prompt_tokens), 0)`,
-      completionTokens:      sql<number>`coalesce(sum(l.completion_tokens), 0)`,
-      pricePerMInput:        modelPricing.pricePerMInputTokens,
-      pricePerMOutput:       modelPricing.pricePerMOutputTokens,
+      promptTokens:       sql<number>`coalesce(sum(${modelCallLogs.promptTokens}), 0)`,
+      completionTokens:   sql<number>`coalesce(sum(${modelCallLogs.completionTokens}), 0)`,
+      // output_image_count is NULL on records logged before this column existed;
+      // we also carry succeededCalls so we can fall back for those legacy rows.
+      succeededCalls:     sql<number>`sum(case when ${modelCallLogs.status} = 'succeeded' then 1 else 0 end)`,
+      outputImageCount:   sql<number>`coalesce(sum(${modelCallLogs.outputImageCount}), 0)`,
+      inputImageCount:    sql<number>`coalesce(sum(${modelCallLogs.inputImageCount}), 0)`,
+      isImageModel:       modelPricing.isImageModel,
+      pricePerMInput:     modelPricing.pricePerMInputTokens,
+      pricePerMOutput:    modelPricing.pricePerMOutputTokens,
+      pricePerImage:      modelPricing.pricePerImage,
+      pricePerInputImage: modelPricing.pricePerInputImage,
+      currency:           modelPricing.currency,
     })
     .from(modelCallLogs)
     .leftJoin(
@@ -50,16 +59,27 @@ billingRouter.get("/summary", async (c) => {
     .where(where)
     .groupBy(modelCallLogs.provider, modelCallLogs.model);
 
-    const estimatedCostUsd = costRows.reduce((sum, r) => {
-    if (r.pricePerMInput == null) return sum;
-    return (
-      sum +
-      (r.promptTokens     / 1_000_000) * r.pricePerMInput +
-      (r.completionTokens / 1_000_000) * (r.pricePerMOutput ?? 0)
-    );
-  }, 0);
+  // Accumulate costs per currency, branching on billing model type
+  let estimatedCostUsd = 0;
+  let estimatedCostCny = 0;
+  for (const r of costRows) {
+    if (r.currency == null) continue; // no pricing record for this model
+    let cost: number;
+    if (r.isImageModel) {
+      // For legacy log rows (before output_image_count column), the sum is 0.
+      // Fall back to succeeded-call count — each successful image call produces 1 image.
+      const effectiveOut = r.outputImageCount > 0 ? r.outputImageCount : r.succeededCalls;
+      cost = effectiveOut           * (r.pricePerImage      ?? 0)
+           + r.inputImageCount      * (r.pricePerInputImage ?? 0);
+    } else {
+      cost = (r.promptTokens     / 1_000_000) * (r.pricePerMInput  ?? 0)
+           + (r.completionTokens / 1_000_000) * (r.pricePerMOutput ?? 0);
+    }
+    if (r.currency === "CNY") estimatedCostCny += cost;
+    else                      estimatedCostUsd += cost;
+  }
 
-  return c.json({ ...agg, estimatedCostUsd });
+  return c.json({ ...agg, estimatedCostUsd, estimatedCostCny });
 });
 
 // ---------------------------------------------------------------------------
@@ -85,9 +105,15 @@ billingRouter.get("/by-model", async (c) => {
       promptTokens:        sql<number>`coalesce(sum(${modelCallLogs.promptTokens}), 0)`,
       completionTokens:    sql<number>`coalesce(sum(${modelCallLogs.completionTokens}), 0)`,
       totalTokens:         sql<number>`coalesce(sum(${modelCallLogs.totalTokens}), 0)`,
+      outputImageCount:    sql<number>`coalesce(sum(${modelCallLogs.outputImageCount}), 0)`,
+      inputImageCount:     sql<number>`coalesce(sum(${modelCallLogs.inputImageCount}), 0)`,
       avgDurationMs:       sql<number>`avg(${modelCallLogs.durationMs})`,
+      isImageModel:        modelPricing.isImageModel,
       pricePerMInput:      modelPricing.pricePerMInputTokens,
       pricePerMOutput:     modelPricing.pricePerMOutputTokens,
+      pricePerImage:       modelPricing.pricePerImage,
+      pricePerInputImage:  modelPricing.pricePerInputImage,
+      currency:            modelPricing.currency,
     })
     .from(modelCallLogs)
     .leftJoin(
@@ -101,14 +127,18 @@ billingRouter.get("/by-model", async (c) => {
     .groupBy(modelCallLogs.provider, modelCallLogs.model)
     .orderBy(desc(sql`count(*)`));
 
-  const data = rows.map((r) => ({
-    ...r,
-    estimatedCostUsd:
-      r.pricePerMInput != null
-        ? (r.promptTokens     / 1_000_000) * r.pricePerMInput +
-          (r.completionTokens / 1_000_000) * (r.pricePerMOutput ?? 0)
-        : null,
-  }));
+  const data = rows.map((r) => {
+    if (r.currency == null) return { ...r, estimatedCost: null, currency: null };
+    const effectiveOut = r.isImageModel && r.outputImageCount === 0
+      ? r.succeededCalls
+      : r.outputImageCount;
+    const cost = r.isImageModel
+      ? effectiveOut           * (r.pricePerImage      ?? 0)
+      + r.inputImageCount      * (r.pricePerInputImage ?? 0)
+      : (r.promptTokens     / 1_000_000) * (r.pricePerMInput  ?? 0)
+      + (r.completionTokens / 1_000_000) * (r.pricePerMOutput ?? 0);
+    return { ...r, estimatedCost: cost };
+  });
 
   return c.json({ data });
 });
@@ -131,10 +161,13 @@ billingRouter.get("/pricing", async (c) => {
 billingRouter.put("/pricing/:provider/:modelId", async (c) => {
   const { provider, modelId } = c.req.param();
   const body = (await c.req.json()) as {
+    currency?: string;
     pricePerMInputTokens?: number;
+    pricePerMCachedInputTokens?: number;
     pricePerMOutputTokens?: number;
     isImageModel?: boolean;
     pricePerImage?: number;
+    pricePerInputImage?: number;
   };
 
   const now = new Date();
@@ -149,10 +182,13 @@ billingRouter.put("/pricing/:provider/:modelId", async (c) => {
     await db
       .update(modelPricing)
       .set({
-        pricePerMInputTokens:  body.pricePerMInputTokens  ?? 0,
-        pricePerMOutputTokens: body.pricePerMOutputTokens ?? 0,
-        isImageModel:          body.isImageModel          ?? false,
-        pricePerImage:         body.pricePerImage         ?? 0,
+        currency:                     body.currency                     ?? "USD",
+        pricePerMInputTokens:         body.pricePerMInputTokens         ?? 0,
+        pricePerMCachedInputTokens:   body.pricePerMCachedInputTokens   ?? 0,
+        pricePerMOutputTokens:        body.pricePerMOutputTokens        ?? 0,
+        isImageModel:                 body.isImageModel                 ?? false,
+        pricePerImage:                body.pricePerImage                ?? 0,
+        pricePerInputImage:           body.pricePerInputImage           ?? 0,
         updatedAt: now,
       })
       .where(and(eq(modelPricing.provider, provider), eq(modelPricing.modelId, modelId)));
@@ -161,10 +197,13 @@ billingRouter.put("/pricing/:provider/:modelId", async (c) => {
       id: randomUUID(),
       provider,
       modelId,
-      pricePerMInputTokens:  body.pricePerMInputTokens  ?? 0,
-      pricePerMOutputTokens: body.pricePerMOutputTokens ?? 0,
-      isImageModel:          body.isImageModel          ?? false,
-      pricePerImage:         body.pricePerImage         ?? 0,
+      currency:                     body.currency                     ?? "USD",
+      pricePerMInputTokens:         body.pricePerMInputTokens         ?? 0,
+      pricePerMCachedInputTokens:   body.pricePerMCachedInputTokens   ?? 0,
+      pricePerMOutputTokens:        body.pricePerMOutputTokens        ?? 0,
+      isImageModel:                 body.isImageModel                 ?? false,
+      pricePerImage:                body.pricePerImage                ?? 0,
+      pricePerInputImage:           body.pricePerInputImage           ?? 0,
       updatedAt: now,
     });
   }

@@ -15,6 +15,20 @@
       "when": 1753696800000,
       "tag": "0001_logs_and_billing",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1754128800000,
+      "tag": "0004_billing_extensions",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1754132400000,
+      "tag": "0005_image_billing",
+      "breakpoints": true
     }
   ]
 }

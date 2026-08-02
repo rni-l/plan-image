@@ -89,6 +89,13 @@ settingsRouter.put("/routes/:scene", async (c) => {
   const body = await c.req.json<{
     providerName: "bailian" | "volcengine" | "gpt_proxy";
     modelId: string;
+    /**
+     * Optional billing model ID. When the API request model (e.g. a Volcengine
+     * endpoint ID) differs from the publicly priced model name, set this to the
+     * pricing key (e.g. "seedream-4.5") so cost calculations join correctly.
+     * Leave unset (or null) to bill under the request model name.
+     */
+    billingModelId?: string | null;
     parameters?: unknown;
   }>();
   const now = new Date();
@@ -127,6 +134,7 @@ settingsRouter.put("/routes/:scene", async (c) => {
       .set({
         providerId: provider.id,
         modelId: body.modelId,
+        billingModelId: body.billingModelId ?? null,
         parameters: body.parameters ? JSON.stringify(body.parameters) : null,
         updatedAt: now,
       })
@@ -137,6 +145,7 @@ settingsRouter.put("/routes/:scene", async (c) => {
       scene: scene as import("../db/schema.js").SceneKey,
       providerId: provider.id,
       modelId: body.modelId,
+      billingModelId: body.billingModelId ?? null,
       parameters: body.parameters ? JSON.stringify(body.parameters) : null,
       updatedAt: now,
     });

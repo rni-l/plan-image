@@ -112,7 +112,9 @@ export async function gatewayCall(
       jobId: jobId ?? null,
       scene,
       provider: provider.name,
-      model: route.modelId,
+      // Use billingModelId when set so the billing join hits the correct pricing row.
+      // The actual request model is captured in requestParams._sentBody.
+      model: route.billingModelId ?? route.modelId,
       status: "failed",
       errorType: ge?.type ?? "unknown",
       errorMessage: ge?.message ?? (err instanceof Error ? err.message : String(err)),
@@ -123,6 +125,9 @@ export async function gatewayCall(
       promptTokens: null,
       completionTokens: null,
       totalTokens: null,
+      // No output produced on failure — image counts stay null
+      inputImageCount: null,
+      outputImageCount: null,
       createdAt: new Date(),
     }).catch(() => {});
     throw err;
@@ -144,7 +149,9 @@ export async function gatewayCall(
     jobId: jobId ?? null,
     scene,
     provider: provider.name,
-    model: route.modelId,
+    // Use billingModelId when set so the billing join hits the correct pricing row.
+    // The actual request model is captured in requestParams._sentBody.
+    model: route.billingModelId ?? route.modelId,
     status: "succeeded",
     errorType: null,
     errorMessage: null,
@@ -155,6 +162,10 @@ export async function gatewayCall(
     promptTokens: result.usage?.promptTokens ?? null,
     completionTokens: result.usage?.completionTokens ?? null,
     totalTokens: result.usage?.totalTokens ?? null,
+    // For image-generation calls: count output image and input reference images.
+    // null on text/vision calls (result.image is absent).
+    outputImageCount: result.image != null ? 1 : null,
+    inputImageCount:  result.image != null ? (req.images?.length ?? 0) : null,
     createdAt: new Date(),
   }).catch(() => {});
 

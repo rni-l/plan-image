@@ -280,7 +280,15 @@ export const modelSceneRoutes = sqliteTable("model_scene_routes", {
   id: text("id").primaryKey(),
   scene: text("scene").$type<SceneKey>().notNull().unique(),
   providerId: text("provider_id").references(() => modelProviders.id),
+  /** Model ID passed to the API request (e.g. endpoint ID or canonical model name) */
   modelId: text("model_id"),
+  /**
+   * Billing model ID — the key used to look up pricing in model_pricing.
+   * When null, falls back to modelId for billing purposes.
+   * Use this when the request model (e.g. a Volcengine endpoint ID) differs
+   * from the publicly priced model name (e.g. "seedream-4.5").
+   */
+  billingModelId: text("billing_model_id"),
   /** JSON object of extra model parameters */
   parameters: text("parameters"),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
@@ -321,6 +329,16 @@ export const modelCallLogs = sqliteTable("model_call_logs", {
   promptTokens: integer("prompt_tokens"),
   completionTokens: integer("completion_tokens"),
   totalTokens: integer("total_tokens"),
+  /**
+   * Number of reference/input images sent to an image-generation call.
+   * null = not an image-generation call (text/vision).
+   */
+  inputImageCount: integer("input_image_count"),
+  /**
+   * Number of output images returned by an image-generation call.
+   * null = not an image-generation call. Typically 1; set even when n>1.
+   */
+  outputImageCount: integer("output_image_count"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   // NOTE: prompt text, request headers, and API keys are never stored here
 });
@@ -349,13 +367,22 @@ export const modelPricing = sqliteTable("model_pricing", {
   id: text("id").primaryKey(),
   provider: text("provider").notNull(),
   modelId: text("model_id").notNull(),
-  /** Price in USD per 1 million input tokens (text models) */
+  /** Currency of all price fields in this row: 'USD' or 'CNY' */
+  currency: text("currency").notNull().default("USD"),
+  /** Price per 1 million input tokens (text models) */
   pricePerMInputTokens: real("price_per_m_input_tokens").notNull().default(0),
-  /** Price in USD per 1 million output tokens (text models) */
+  /** Price per 1 million *cached* input tokens (text models; 0 = no cache discount) */
+  pricePerMCachedInputTokens: real("price_per_m_cached_input_tokens").notNull().default(0),
+  /** Price per 1 million output tokens (text models) */
   pricePerMOutputTokens: real("price_per_m_output_tokens").notNull().default(0),
   /** 1 = image-generation model, 0 = text/vision model */
   isImageModel: integer("is_image_model", { mode: "boolean" }).notNull().default(false),
-  /** Price in USD per generated image (image models) */
+  /** Price per generated output image (image models) */
   pricePerImage: real("price_per_image").notNull().default(0),
+  /**
+   * Price per *input* reference image (image-to-image models, e.g. Seedream 5.0 Pro).
+   * 0 = input images not billed separately.
+   */
+  pricePerInputImage: real("price_per_input_image").notNull().default(0),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });
