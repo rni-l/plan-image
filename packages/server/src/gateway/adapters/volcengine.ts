@@ -126,7 +126,7 @@ export class VolcengineAdapter implements ModelAdapter {
       model: req.model,
       prompt: req.prompt,
       stream: false,                                              // synchronous response
-      response_format: (response_format as string | undefined) ?? "url",
+      response_format: (response_format as string | undefined) ?? "b64_json",
       watermark: watermark ?? false,
       size: toSeedreamSize(size),                                // "1K" / "2K" / "4K"
       ...restParams,

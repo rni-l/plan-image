@@ -25,15 +25,18 @@ settingsRouter.get("/providers", async (c) => {
 
 settingsRouter.put("/providers/:name", async (c) => {
   const name = c.req.param("name") as "bailian" | "volcengine" | "gpt_proxy";
-  const body = await c.req.json<{ apiKey: string; baseUrl?: string; modelId?: string }>();
+  // apiKey is optional: omit (or send empty) to update only baseUrl without touching the stored key
+  const body = await c.req.json<{ apiKey?: string; baseUrl?: string; modelId?: string }>();
 
-  // Store key in secrets file, never in the database
-  const secretsFile = path.join(paths.secrets, `${name}.json`);
-  const secretData = { apiKey: body.apiKey };
-  fs.writeFileSync(secretsFile, JSON.stringify(secretData), { mode: 0o600 });
-
-  const keyHint = body.apiKey.slice(-4);
   const now = new Date();
+  let keyHint: string | undefined;
+
+  if (body.apiKey?.trim()) {
+    // New key provided — persist to secrets file
+    const secretsFile = path.join(paths.secrets, `${name}.json`);
+    fs.writeFileSync(secretsFile, JSON.stringify({ apiKey: body.apiKey }), { mode: 0o600 });
+    keyHint = body.apiKey.slice(-4);
+  }
 
   const existing = await db
     .select()
@@ -44,8 +47,8 @@ settingsRouter.put("/providers/:name", async (c) => {
     await db
       .update(modelProviders)
       .set({
-        isConfigured: true,
-        keyHint,
+        // Only flip isConfigured / keyHint when a new key was supplied
+        ...(keyHint ? { isConfigured: true, keyHint } : {}),
         baseUrl: body.baseUrl ?? null,
         updatedAt: now,
       })
@@ -55,14 +58,14 @@ settingsRouter.put("/providers/:name", async (c) => {
       id: randomUUID(),
       name,
       baseUrl: body.baseUrl ?? null,
-      isConfigured: true,
-      keyHint,
+      isConfigured: keyHint ? true : false,
+      keyHint: keyHint ?? null,
       updatedAt: now,
     });
   }
 
   const [row] = await db.select().from(modelProviders).where(eq(modelProviders.name, name));
-  invalidateAdapterCache(); // key changed — rebuild adapters on next call
+  invalidateAdapterCache();
   return c.json(row);
 });
 

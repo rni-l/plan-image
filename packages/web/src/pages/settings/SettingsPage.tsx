@@ -147,18 +147,32 @@ function ProviderCard({
   onSave,
 }: {
   provider: Provider;
-  onSave: (name: Provider["name"], apiKey: string, baseUrl?: string, modelId?: string) => Promise<void>;
+  onSave: (name: Provider["name"], apiKey: string, baseUrl?: string) => Promise<void>;
 }) {
   const meta = PROVIDER_META[provider.name];
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState(provider.baseUrl ?? "");
   const [saving, setSaving] = useState(false);
 
+  // Sync baseUrl input when server data loads (initial state initialises before the fetch resolves)
+  useEffect(() => {
+    setBaseUrl(provider.baseUrl ?? "");
+  }, [provider.baseUrl]);
+
+  // Can save when:
+  //  • a new API key was entered (first-time setup or key rotation), OR
+  //  • provider already configured and the URL field has changed
+  const baseUrlChanged =
+    meta.hasBaseUrl && baseUrl.trim() !== (provider.baseUrl ?? "");
+  const canSave =
+    apiKey.trim().length > 0 || (provider.isConfigured && baseUrlChanged);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!apiKey.trim()) return;
+    if (!canSave) return;
     setSaving(true);
     try {
+      // Pass empty string when no new key — server ignores it and keeps the stored key
       await onSave(provider.name, apiKey.trim(), baseUrl.trim() || undefined);
       setApiKey("");
     } finally {
@@ -189,9 +203,7 @@ function ProviderCard({
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
         {meta.hasBaseUrl && (
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor={`${provider.name}-baseurl`}>
-              {provider.name === "bailian" ? "专属服务地址 Base URL" : "Base URL"}
-            </Label>
+            <Label htmlFor={`${provider.name}-baseurl`}>Base URL</Label>
             <Input
               id={`${provider.name}-baseurl`}
               placeholder="https://api.example.com"
@@ -204,13 +216,13 @@ function ProviderCard({
           <div className="flex-1">
             <Input
               type="password"
-              placeholder={provider.isConfigured ? "输入新密钥以更新" : "粘贴 API 密钥"}
+              placeholder={provider.isConfigured ? "输入新密钥以更新（可留空仅改 URL）" : "粘贴 API 密钥"}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               autoComplete="off"
             />
           </div>
-          <Button type="submit" disabled={!apiKey.trim() || saving} size="sm">
+          <Button type="submit" disabled={!canSave || saving} size="sm">
             <Save size={14} />
             {saving ? "保存中…" : "保存"}
           </Button>
