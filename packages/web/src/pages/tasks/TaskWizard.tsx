@@ -3,6 +3,7 @@ import { useParams, useNavigate, NavLink } from "react-router-dom";
 import {
   Loader2, ChevronRight, Check, Plus, X, GripVertical,
   RefreshCw, ZoomIn, AlertCircle, Zap, Pencil, Download, Rows2,
+  MessageSquare, Send, Clock, ChevronDown, Info,
 } from "lucide-react";
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors,
@@ -19,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ImageLightbox } from "@/components/ui/image-lightbox";
+import { Sheet } from "@/components/ui/sheet";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogClose,
 } from "@/components/ui/dialog";
@@ -54,7 +56,7 @@ interface DirectionContent {
 }
 
 interface DraftItem {
-  id?: string;                // present when loaded from DB
+  id?: string;
   listType: "main_image" | "detail_page";
   title: string;
   description?: string;
@@ -99,6 +101,14 @@ interface OutputPreset {
   format: string;
 }
 
+/** Config collected in Step 1, passed through to Step 2 */
+interface Step1Config {
+  userIdeas: string;
+  planCount: number;
+  mainImageCount: number;
+  detailImageCount: number;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -111,12 +121,141 @@ const STEPS = [
 ] as const;
 
 // ---------------------------------------------------------------------------
+// Helper: format elapsed seconds
+// ---------------------------------------------------------------------------
+
+function fmtElapsed(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+// ---------------------------------------------------------------------------
+// Direction Chat Sheet — inline chat with a specific design direction
+// ---------------------------------------------------------------------------
+function DirectionChatSheet({
+  direction,
+  open,
+  onOpenChange,
+  onUpdated,
+}: {
+  direction: DesignDirection;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onUpdated: (id: string, newContent: string) => void;
+}) {
+  const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Reset messages when direction changes
+  useEffect(() => { setMessages([]); setInput(""); }, [direction.id]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  async function handleSend() {
+    const text = input.trim();
+    if (!text || sending) return;
+    const userMsg = { role: "user" as const, content: text };
+    setMessages(prev => [...prev, userMsg]);
+    setInput("");
+    setSending(true);
+    try {
+      const res = await api.post<{ reply: string; updatedContent: Record<string, unknown> | null }>(
+        `/tasks/directions/${direction.id}/chat`,
+        { message: text, history: messages }
+      );
+      setMessages(prev => [...prev, { role: "assistant", content: res.reply }]);
+      if (res.updatedContent) {
+        onUpdated(direction.id, JSON.stringify(res.updatedContent));
+        toast.success("方向内容已更新");
+      }
+    } catch {
+      toast.error("发送失败，请重试");
+      setMessages(prev => prev.slice(0, -1)); // remove optimistic user msg
+    } finally {
+      setSending(false);
+    }
+  }
+
+  const content = parseDirection(direction.content);
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange} title={`调整方向：${content.label ?? direction.label}`} className="w-[500px]">
+      <div className="flex h-full flex-col">
+        {/* Direction summary */}
+        <div className="border-b border-zinc-100 bg-zinc-50 px-5 py-3 text-xs text-zinc-500 space-y-0.5">
+          {content.positioning && <p><span className="font-medium">定位：</span>{content.positioning}</p>}
+          {content.colorScheme && <p><span className="font-medium">配色：</span>{content.colorScheme}</p>}
+        </div>
+
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {messages.length === 0 && (
+            <p className="text-center text-xs text-zinc-400 py-8">
+              描述你想调整的方向，AI 将帮你优化方案
+            </p>
+          )}
+          {messages.map((msg, i) => (
+            <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+                msg.role === "user"
+                  ? "bg-zinc-900 text-white"
+                  : "bg-zinc-100 text-zinc-800"
+              }`}>
+                {msg.content}
+              </div>
+            </div>
+          ))}
+          {sending && (
+            <div className="flex justify-start">
+              <div className="flex items-center gap-1.5 rounded-2xl bg-zinc-100 px-4 py-2.5 text-sm text-zinc-400">
+                <Loader2 size={12} className="animate-spin" /> 思考中…
+              </div>
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
+
+        {/* Input */}
+        <div className="border-t border-zinc-100 px-4 py-3">
+          <div className="flex gap-2">
+            <Textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="描述你的想法…"
+              rows={2}
+              className="flex-1 resize-none text-sm"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+              }}
+            />
+            <Button size="sm" onClick={handleSend} disabled={!input.trim() || sending} className="self-end">
+              <Send size={13} />
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Sheet>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Step 2 — SSE: stream progress + LLM output → display direction cards
 // ---------------------------------------------------------------------------
 
-function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
+function Step2({
+  task,
+  config,
+  onNext,
+}: {
+  task: GenerationTask;
+  config: Step1Config;
+  onNext: () => void;
+}) {
   const [directions, setDirections] = useState<DesignDirection[]>([]);
-  /** null = streaming in progress; "done" = completed; string = error message */
   const [streamState, setStreamState] = useState<null | "done" | string>(null);
   const [steps, setSteps] = useState<string[]>([]);
   const [tokenBuffer, setTokenBuffer] = useState("");
@@ -125,20 +264,47 @@ function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
   const sourceRef = useRef<EventSource | null>(null);
   const tokenEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Auto-scroll token stream to bottom
+  // Elapsed timer
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startTimeRef = useRef<number>(0);
+
+  // Chat sheet state
+  const [chatDir, setChatDir] = useState<DesignDirection | null>(null);
+
   useEffect(() => {
     tokenEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [tokenBuffer]);
 
+  const stopTimer = useCallback(() => {
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+  }, []);
+
   const startStream = useCallback(() => {
-    // Clean up previous connection if any
     sourceRef.current?.close();
     setStreamState(null);
     setSteps([]);
     setTokenBuffer("");
     setDirections([]);
+    setElapsedMs(0);
+    stopTimer();
 
-    const src = new EventSource(`/api/tasks/${task.id}/generate-directions-stream`);
+    startTimeRef.current = Date.now();
+    timerRef.current = setInterval(() => {
+      setElapsedMs(Date.now() - startTimeRef.current);
+    }, 200);
+
+    const outputTypes: string[] = JSON.parse(task.outputTypes);
+    const mainCount = outputTypes.includes("main_image") ? config.mainImageCount : 0;
+    const detailCount = outputTypes.includes("detail_page") ? config.detailImageCount : 0;
+    const params = new URLSearchParams({
+      planCount: String(config.planCount),
+      ...(mainCount > 0 ? { mainImageCount: String(mainCount) } : {}),
+      ...(detailCount > 0 ? { detailImageCount: String(detailCount) } : {}),
+      ...(config.userIdeas.trim() ? { userIdeas: config.userIdeas.trim() } : {}),
+    });
+
+    const src = new EventSource(`/api/tasks/${task.id}/generate-directions-stream?${params.toString()}`);
     sourceRef.current = src;
 
     src.onmessage = (e: MessageEvent<string>) => {
@@ -152,7 +318,8 @@ function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
       } else if (payload.type === "done") {
         src.close();
         sourceRef.current = null;
-        // Fetch directions from DB now that they're saved
+        stopTimer();
+        setElapsedMs(Date.now() - startTimeRef.current);
         api.get<{ directions: DesignDirection[] }>(`/tasks/${task.id}`)
           .then((data) => {
             setDirections(data.directions);
@@ -162,6 +329,7 @@ function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
       } else if (payload.type === "error") {
         src.close();
         sourceRef.current = null;
+        stopTimer();
         setStreamState(payload.message ?? "生成失败，请重试");
       }
     };
@@ -169,15 +337,15 @@ function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
     src.onerror = () => {
       src.close();
       sourceRef.current = null;
+      stopTimer();
       setStreamState("连接中断，请点击重试");
     };
-  }, [task.id]);
+  }, [task.id, task.outputTypes, config, stopTimer]);
 
-  // Start stream on mount
   useEffect(() => {
     startStream();
-    return () => { sourceRef.current?.close(); };
-  }, [startStream]);
+    return () => { sourceRef.current?.close(); stopTimer(); };
+  }, [startStream, stopTimer]);
 
   async function handleNext() {
     if (!selectedId) return;
@@ -189,6 +357,10 @@ function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
       toast.error("保存失败，请重试");
       setSaving(false);
     }
+  }
+
+  function handleDirectionUpdated(id: string, newContent: string) {
+    setDirections(prev => prev.map(d => d.id === id ? { ...d, content: newContent } : d));
   }
 
   // ── Error state ────────────────────────────────────────────────────────────
@@ -208,6 +380,11 @@ function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
   if (streamState === null) {
     return (
       <div className="flex flex-col gap-4 px-8 py-6">
+        {/* Elapsed timer */}
+        <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+          <Clock size={12} className="shrink-0" />
+          <span>已用时 {fmtElapsed(elapsedMs)}</span>
+        </div>
         {/* Step progress */}
         <div className="flex flex-col gap-1.5">
           {steps.map((s, i) => (
@@ -229,8 +406,6 @@ function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
             </div>
           )}
         </div>
-
-        {/* LLM token stream */}
         {tokenBuffer && (
           <div className="max-h-56 overflow-y-auto rounded-lg bg-zinc-950 p-3">
             <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-emerald-400">
@@ -249,6 +424,9 @@ function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
       <div className="mb-5 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h2 className="text-sm font-medium text-zinc-900">选择设计方向</h2>
+          <span className="flex items-center gap-1 text-xs text-zinc-400">
+            <Clock size={11} /> {fmtElapsed(elapsedMs)}
+          </span>
           <Button variant="outline" size="sm" onClick={startStream}>
             <RefreshCw size={12} /> 重新生成
           </Button>
@@ -263,52 +441,93 @@ function Step2({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
           const content = parseDirection(dir.content);
           const isSelected = selectedId === dir.id;
           return (
-            <button
+            <div
               key={dir.id}
-              onClick={() => setSelectedId(dir.id)}
-              className={`flex flex-col rounded-xl border p-4 text-left transition-all ${
+              className={`flex flex-col rounded-xl border text-left transition-all ${
                 isSelected ? "border-zinc-900 shadow-md ring-1 ring-zinc-900" : "border-zinc-100 hover:border-zinc-300"
               }`}
             >
-              <div className="mb-3 flex items-start justify-between">
+              {/* Card header — clickable to select */}
+              <button
+                onClick={() => setSelectedId(dir.id)}
+                className="flex w-full items-start justify-between p-4 pb-2 text-left"
+              >
                 <span className="text-sm font-semibold text-zinc-900">{content.label ?? dir.label}</span>
                 {isSelected && (
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-zinc-900">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-zinc-900">
                     <Check size={10} className="text-white" />
                   </span>
                 )}
-              </div>
-              <div className="flex flex-col gap-2 text-xs">
+              </button>
+
+              {/* Full content */}
+              <div
+                onClick={() => setSelectedId(dir.id)}
+                className="flex flex-1 cursor-pointer flex-col gap-2.5 px-4 pb-3 text-xs"
+              >
                 {content.positioning && (
                   <div>
                     <span className="font-medium text-zinc-500">定位</span>
-                    <p className="mt-0.5 text-zinc-700 line-clamp-2">{content.positioning}</p>
+                    <p className="mt-0.5 text-zinc-700">{content.positioning}</p>
                   </div>
                 )}
                 {content.colorScheme && (
                   <div>
                     <span className="font-medium text-zinc-500">配色</span>
-                    <p className="mt-0.5 text-zinc-700 line-clamp-2">{content.colorScheme}</p>
+                    <p className="mt-0.5 text-zinc-700">{content.colorScheme}</p>
                   </div>
                 )}
                 {content.layoutIntent && (
                   <div>
                     <span className="font-medium text-zinc-500">版式</span>
-                    <p className="mt-0.5 text-zinc-700 line-clamp-2">{content.layoutIntent}</p>
+                    <p className="mt-0.5 text-zinc-700">{content.layoutIntent}</p>
                   </div>
                 )}
-                {content.imageList && (
-                  <p className="mt-1 text-zinc-400">{content.imageList.length} 张图片</p>
+                {content.copyStrategy && (
+                  <div>
+                    <span className="font-medium text-zinc-500">文案策略</span>
+                    <p className="mt-0.5 text-zinc-700">{content.copyStrategy}</p>
+                  </div>
+                )}
+                {content.imageList && content.imageList.length > 0 && (
+                  <div>
+                    <span className="font-medium text-zinc-500">图片清单（{content.imageList.length} 张）</span>
+                    <ul className="mt-1 space-y-0.5">
+                      {content.imageList.map((img, i) => (
+                        <li key={i} className="text-zinc-500">
+                          {i + 1}. [{img.listType === "main_image" ? "主图" : "详情页"}] {img.title}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
               </div>
-            </button>
+
+              {/* Chat button */}
+              <div className="border-t border-zinc-100 px-4 py-2">
+                <button
+                  onClick={() => setChatDir(dir)}
+                  className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-700 transition-colors"
+                >
+                  <MessageSquare size={12} /> 聊天调整
+                </button>
+              </div>
+            </div>
           );
         })}
       </div>
+
+      {chatDir && (
+        <DirectionChatSheet
+          direction={chatDir}
+          open
+          onOpenChange={(v) => { if (!v) setChatDir(null); }}
+          onUpdated={handleDirectionUpdated}
+        />
+      )}
     </div>
   );
 }
-
 
 // ---------------------------------------------------------------------------
 // Step 3 — editable image list, confirm dialog, create plan
@@ -395,7 +614,6 @@ function Step3({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
       );
       toast.success(`方案已确认，共 ${res.items.length} 张图片`);
       setConfirmOpen(false);
-      // Store planVersionId for step4 via navigation state
       onNext();
     } catch {
       toast.error("确认失败，请重试");
@@ -457,7 +675,6 @@ function Step3({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
         </div>
       )}
 
-      {/* Confirm dialog */}
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
           <DialogHeader>
@@ -482,11 +699,13 @@ function Step3({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 4 — generation grid + per-item polling + retry
+// Step 4 — generation grid + per-item polling + retry + streaming timers
 // ---------------------------------------------------------------------------
 
 function Step4({ task }: { task: GenerationTask }) {
   const [planVersionId, setPlanVersionId] = useState<string | null>(null);
+  const [selectedDirection, setSelectedDirection] = useState<DesignDirection | null>(null);
+  const [configOpen, setConfigOpen] = useState(false);
   const [items, setItems] = useState<ImageItem[]>([]);
   const [jobs, setJobs] = useState<Record<string, Job>>({});
   const [versions, setVersions] = useState<Record<string, ImageVersion[]>>({});
@@ -498,22 +717,51 @@ function Step4({ task }: { task: GenerationTask }) {
   } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Streaming state — maps itemId → current preview b64 / whether streaming is active
+  // Streaming state
   const [streamPreviews, setStreamPreviews] = useState<Record<string, string>>({});
   const [streamingIds, setStreamingIds] = useState<Set<string>>(new Set());
   const streamSourcesRef = useRef<Record<string, EventSource>>({});
 
-  // Load latest plan version for this task
+  // Per-image generation timers
+  const [streamStartTimes, setStreamStartTimes] = useState<Record<string, number>>({});
+  const [streamElapsedMs, setStreamElapsedMs] = useState<Record<string, number>>({});
+  const [streamFinalMs, setStreamFinalMs] = useState<Record<string, number>>({});
+  const streamTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Per-image params expand state
+  const [expandedParams, setExpandedParams] = useState<Set<string>>(new Set());
+
+  // Tick all active streaming timers
   useEffect(() => {
-    api.get<{ planVersions: Array<{ id: string }> }>(`/tasks/${task.id}`)
+    streamTimerRef.current = setInterval(() => {
+      setStreamElapsedMs(prev => {
+        const now = Date.now();
+        const next: Record<string, number> = { ...prev };
+        for (const id of Object.keys(streamStartTimes)) {
+          if (streamingIds.has(id)) next[id] = now - (streamStartTimes[id] ?? now);
+        }
+        return next;
+      });
+    }, 200);
+    return () => { if (streamTimerRef.current) clearInterval(streamTimerRef.current); };
+  }, [streamStartTimes, streamingIds]);
+
+  useEffect(() => {
+    api.get<{
+      planVersions: Array<{ id: string; selectedDirectionId: string }>;
+      directions: DesignDirection[];
+    }>(`/tasks/${task.id}`)
       .then((data) => {
         const latest = data.planVersions[0];
-        if (latest) setPlanVersionId(latest.id);
+        if (latest) {
+          setPlanVersionId(latest.id);
+          const dir = data.directions.find(d => d.id === latest.selectedDirectionId);
+          if (dir) setSelectedDirection(dir);
+        }
       })
       .catch(() => toast.error("加载方案数据失败"));
   }, [task.id]);
 
-  // Load items once planVersionId is known
   useEffect(() => {
     if (!planVersionId) return;
     api.get<ImageItem[]>(`/tasks/${task.id}/plan/${planVersionId}/items`)
@@ -521,7 +769,6 @@ function Step4({ task }: { task: GenerationTask }) {
       .catch(() => toast.error("加载图片清单失败"));
   }, [task.id, planVersionId]);
 
-  // Load versions for all items
   const loadVersions = useCallback(async (itemList: ImageItem[]) => {
     const entries = await Promise.all(
       itemList.map(async (item) => {
@@ -536,12 +783,8 @@ function Step4({ task }: { task: GenerationTask }) {
     if (items.length > 0) loadVersions(items);
   }, [items, loadVersions]);
 
-  // Poll jobs for all items
   const pollJobs = useCallback(async (itemList: ImageItem[]) => {
-    const allJobs = await api.get<Job[]>(
-      `/jobs?entityType=image_item`
-    ).catch(() => [] as Job[]);
-
+    const allJobs = await api.get<Job[]>(`/jobs?entityType=image_item`).catch(() => [] as Job[]);
     const itemIds = new Set(itemList.map(it => it.id));
     const relevant = allJobs.filter(j => j.entityId && itemIds.has(j.entityId));
     const byItem: Record<string, Job> = {};
@@ -549,7 +792,6 @@ function Step4({ task }: { task: GenerationTask }) {
       if (j.entityId) byItem[j.entityId] = j;
     }
     setJobs(byItem);
-
     const active = relevant.filter(j => j.status === "queued" || j.status === "running");
     if (active.length === 0) {
       stopPolling();
@@ -562,7 +804,6 @@ function Step4({ task }: { task: GenerationTask }) {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
   }
 
-  // Close all open SSE connections on unmount
   useEffect(() => () => {
     stopPolling();
     Object.values(streamSourcesRef.current).forEach((s) => s.close());
@@ -582,20 +823,7 @@ function Step4({ task }: { task: GenerationTask }) {
     }
   }
 
-  async function handleRetry(itemId: string) {
-    try {
-      await api.post(`/tasks/items/${itemId}/retry`, {});
-      toast.success("已重新提交");
-      if (!pollRef.current) {
-        pollRef.current = setInterval(() => pollJobs(items), 3500);
-      }
-    } catch {
-      toast.error("重试失败");
-    }
-  }
-
   async function handleSelectVersion(itemId: string, versionId: string) {
-    // Optimistic update first, then sync to server
     setVersions((prev) => ({
       ...prev,
       [itemId]: (prev[itemId] ?? []).map((v) => ({ ...v, isSelected: v.id === versionId })),
@@ -609,22 +837,20 @@ function Step4({ task }: { task: GenerationTask }) {
   }
 
   function handleInpaintSubmitted() {
-    // Ensure polling is running so Step 4 auto-updates when the inpaint job finishes
-    if (!pollRef.current) {
-      pollRef.current = setInterval(() => pollJobs(items), 3500);
-    }
+    if (!pollRef.current) pollRef.current = setInterval(() => pollJobs(items), 3500);
   }
 
-  /** Start a streaming (re)generation for a single item via SSE. */
   function startStream(itemId: string) {
-    // Close any existing stream for this item
     if (streamSourcesRef.current[itemId]) {
       streamSourcesRef.current[itemId]!.close();
       delete streamSourcesRef.current[itemId];
     }
 
+    const now = Date.now();
     setStreamingIds((prev) => new Set([...prev, itemId]));
     setStreamPreviews((prev) => ({ ...prev, [itemId]: "" }));
+    setStreamStartTimes((prev) => ({ ...prev, [itemId]: now }));
+    setStreamElapsedMs((prev) => ({ ...prev, [itemId]: 0 }));
 
     const source = new EventSource(`/api/tasks/items/${itemId}/generate-stream`);
     streamSourcesRef.current[itemId] = source;
@@ -642,31 +868,16 @@ function Step4({ task }: { task: GenerationTask }) {
       } else if (payload.type === "done") {
         source.close();
         delete streamSourcesRef.current[itemId];
-        setStreamingIds((prev) => {
-          const next = new Set(prev);
-          next.delete(itemId);
-          return next;
-        });
-        setStreamPreviews((prev) => {
-          const next = { ...prev };
-          delete next[itemId];
-          return next;
-        });
-        // Reload versions to show the newly saved image
+        const elapsed = Date.now() - (streamStartTimes[itemId] ?? Date.now());
+        setStreamFinalMs(prev => ({ ...prev, [itemId]: elapsed }));
+        setStreamingIds((prev) => { const next = new Set(prev); next.delete(itemId); return next; });
+        setStreamPreviews((prev) => { const next = { ...prev }; delete next[itemId]; return next; });
         loadVersions(items).catch(() => {});
       } else if (payload.type === "error") {
         source.close();
         delete streamSourcesRef.current[itemId];
-        setStreamingIds((prev) => {
-          const next = new Set(prev);
-          next.delete(itemId);
-          return next;
-        });
-        setStreamPreviews((prev) => {
-          const next = { ...prev };
-          delete next[itemId];
-          return next;
-        });
+        setStreamingIds((prev) => { const next = new Set(prev); next.delete(itemId); return next; });
+        setStreamPreviews((prev) => { const next = { ...prev }; delete next[itemId]; return next; });
         toast.error(payload.message ?? "生成失败");
       }
     };
@@ -674,22 +885,22 @@ function Step4({ task }: { task: GenerationTask }) {
     source.onerror = () => {
       source.close();
       delete streamSourcesRef.current[itemId];
-      setStreamingIds((prev) => {
-        const next = new Set(prev);
-        next.delete(itemId);
-        return next;
-      });
-      setStreamPreviews((prev) => {
-        const next = { ...prev };
-        delete next[itemId];
-        return next;
-      });
+      setStreamingIds((prev) => { const next = new Set(prev); next.delete(itemId); return next; });
+      setStreamPreviews((prev) => { const next = { ...prev }; delete next[itemId]; return next; });
       toast.error("连接中断，请重试");
     };
   }
 
   const anyGenerated = Object.values(versions).some(vs => vs.length > 0);
   const allDone = items.length > 0 && items.every(it => (versions[it.id]?.length ?? 0) > 0);
+
+  function toggleParamsExpand(itemId: string) {
+    setExpandedParams(prev => {
+      const next = new Set(prev);
+      next.has(itemId) ? next.delete(itemId) : next.add(itemId);
+      return next;
+    });
+  }
 
   return (
     <div className="px-8 py-6">
@@ -706,6 +917,52 @@ function Step4({ task }: { task: GenerationTask }) {
         )}
       </div>
 
+      {/* ── 设计方向配置摘要（折叠） ─────────────────────────── */}
+      {selectedDirection && (() => {
+        const dc = parseDirection(selectedDirection.content);
+        return (
+          <div className="mb-5 rounded-lg border border-zinc-100">
+            <button
+              onClick={() => setConfigOpen(v => !v)}
+              className="flex w-full items-center justify-between px-4 py-2.5 text-left text-xs"
+            >
+              <div className="flex items-center gap-2 text-zinc-500">
+                <Info size={12} className="shrink-0" />
+                <span className="font-medium text-zinc-700">
+                  采用方向：{dc.label ?? selectedDirection.label}
+                </span>
+                {dc.positioning && (
+                  <span className="hidden truncate text-zinc-400 sm:inline max-w-[360px]">
+                    — {dc.positioning}
+                  </span>
+                )}
+              </div>
+              <ChevronDown
+                size={13}
+                className={`shrink-0 text-zinc-400 transition-transform ${configOpen ? "rotate-180" : ""}`}
+              />
+            </button>
+            {configOpen && (
+              <div className="border-t border-zinc-100 px-4 py-3 grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+                {[
+                  { label: "定位", value: dc.positioning },
+                  { label: "配色", value: dc.colorScheme },
+                  { label: "版式", value: dc.layoutIntent },
+                  { label: "文案策略", value: dc.copyStrategy },
+                ].map(({ label, value }) =>
+                  value ? (
+                    <div key={label}>
+                      <span className="font-medium text-zinc-500">{label}</span>
+                      <p className="mt-0.5 text-zinc-700">{value}</p>
+                    </div>
+                  ) : null
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {items.length === 0 ? (
         <div className="flex items-center justify-center py-24 text-zinc-400">
           <Loader2 size={16} className="animate-spin mr-2" /> 加载清单…
@@ -718,15 +975,15 @@ function Step4({ task }: { task: GenerationTask }) {
             const selected = itemVersions.find(v => v.isSelected) ?? itemVersions[0];
             const isStreaming   = streamingIds.has(item.id);
             const streamPreview = streamPreviews[item.id];
+            const elapsed = streamElapsedMs[item.id] ?? 0;
+            const finalMs = streamFinalMs[item.id];
             const isLoading    = !isStreaming && (job?.status === "queued" || job?.status === "running");
             const isFailed     = !isStreaming && (job?.status === "failed"  || job?.status === "interrupted");
             const isInpainting = job?.type === "image_edit" && isLoading;
 
             return (
               <div key={item.id} className="flex flex-col overflow-hidden rounded-xl border border-zinc-100 bg-white">
-                {/* Image area */}
                 <div className="group relative aspect-square w-full overflow-hidden bg-zinc-50">
-                  {/* Streaming: show progressive preview */}
                   {isStreaming ? (
                     <>
                       {streamPreview ? (
@@ -743,7 +1000,7 @@ function Step4({ task }: { task: GenerationTask }) {
                       <div className="absolute inset-0 flex items-end justify-center pb-3 pointer-events-none">
                         <div className="flex items-center gap-1.5 rounded-full bg-zinc-900/80 px-3 py-1.5 text-xs text-white shadow-lg">
                           <Loader2 size={11} className="animate-spin" />
-                          渲染中…
+                          渲染中… {fmtElapsed(elapsed)}
                         </div>
                       </div>
                     </>
@@ -754,17 +1011,14 @@ function Step4({ task }: { task: GenerationTask }) {
                         alt={item.title}
                         className={`h-full w-full object-cover transition-opacity ${isInpainting ? "opacity-50" : ""}`}
                       />
-                      {/* Inpaint-in-progress overlay */}
                       {isInpainting && (
                         <div className="absolute inset-0 flex items-center justify-center">
                           <div className="flex items-center gap-1.5 rounded-full bg-zinc-900/85 px-3 py-1.5 text-xs text-white shadow-lg">
-                            <Loader2 size={12} className="animate-spin" />
-                            微调中…
+                            <Loader2 size={12} className="animate-spin" /> 微调中…
                           </div>
                         </div>
                       )}
                       <div className="absolute right-2 top-2 flex gap-1">
-                        {/* Click image to regenerate via streaming */}
                         <button
                           onClick={() => startStream(item.id)}
                           className="rounded bg-white/80 p-1 opacity-0 shadow-sm transition-opacity hover:bg-white group-hover:opacity-100"
@@ -808,17 +1062,19 @@ function Step4({ task }: { task: GenerationTask }) {
                       <span className="text-xs">生成失败</span>
                     </div>
                   ) : (
-                    <div className="flex h-full items-center justify-center text-xs text-zinc-300">
-                      待生成
-                    </div>
+                    <div className="flex h-full items-center justify-center text-xs text-zinc-300">待生成</div>
                   )}
                 </div>
 
-                {/* Info + actions */}
                 <div className="flex items-start justify-between gap-2 px-3 py-2">
                   <div className="min-w-0">
                     <p className="truncate text-xs font-medium text-zinc-900">{item.title}</p>
-                    <p className="text-xs text-zinc-400">{item.listType === "main_image" ? "主图" : "详情页"}</p>
+                    <p className="text-xs text-zinc-400">
+                      {item.listType === "main_image" ? "主图" : "详情页"}
+                      {finalMs != null && !isStreaming && (
+                        <span className="ml-1.5 text-zinc-300">· {fmtElapsed(finalMs)}</span>
+                      )}
+                    </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
                     {isFailed && !isStreaming && (
@@ -850,13 +1106,58 @@ function Step4({ task }: { task: GenerationTask }) {
                     )}
                   </div>
                 </div>
+
+                {/* Expandable generation params */}
+                <div className="border-t border-zinc-50">
+                  <button
+                    onClick={() => toggleParamsExpand(item.id)}
+                    className="flex w-full items-center gap-1.5 px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors"
+                  >
+                    <ChevronDown
+                      size={11}
+                      className={`shrink-0 transition-transform ${expandedParams.has(item.id) ? "rotate-180" : ""}`}
+                    />
+                    生成参数
+                  </button>
+                  {expandedParams.has(item.id) && (
+                    <div className="border-t border-zinc-50 px-3 pb-3 space-y-1.5 text-[11px]">
+                      {[
+                        { label: "内容描述", value: item.description },
+                        { label: "构图意图", value: item.compositionIntent },
+                        { label: "光照", value: (item as unknown as Record<string, string>)["lighting"] },
+                        { label: "视角", value: (item as unknown as Record<string, string>)["angle"] },
+                        { label: "背景", value: (item as unknown as Record<string, string>)["background"] },
+                        { label: "氛围", value: (item as unknown as Record<string, string>)["mood"] },
+                        { label: "视觉元素", value: (item as unknown as Record<string, string>)["visualElements"] },
+                        { label: "主标题文案", value: item.suggestedCopy },
+                      ].map(({ label, value }) =>
+                        value ? (
+                          <div key={label}>
+                            <span className="font-medium text-zinc-400">{label}</span>
+                            <p className="text-zinc-600 leading-relaxed">{value}</p>
+                          </div>
+                        ) : null
+                      )}
+                      {item.sellingPoints && (() => {
+                        const pts: string[] = typeof item.sellingPoints === "string"
+                          ? JSON.parse(item.sellingPoints)
+                          : item.sellingPoints;
+                        return pts.length > 0 ? (
+                          <div>
+                            <span className="font-medium text-zinc-400">卖点</span>
+                            <p className="text-zinc-600">{pts.join("、")}</p>
+                          </div>
+                        ) : null;
+                      })()}
+                    </div>
+                  )}
+                </div>
               </div>
             );
           })}
         </div>
       )}
 
-      {/* Export toolbar — shown when all items have at least one generated image */}
       {allDone && planVersionId && (
         <ExportToolbar taskId={task.id} planVersionId={planVersionId} items={items} />
       )}
@@ -882,39 +1183,26 @@ function parseDirection(json: string): DirectionContent {
 }
 
 // ---------------------------------------------------------------------------
-// Export toolbar — appears below Step 4 grid when all images are generated
+// Export toolbar
 // ---------------------------------------------------------------------------
 
 function ExportToolbar({
-  taskId,
-  planVersionId,
-  items,
-}: {
-  taskId: string;
-  planVersionId: string;
-  items: ImageItem[];
-}) {
+  taskId, planVersionId, items,
+}: { taskId: string; planVersionId: string; items: ImageItem[] }) {
   const hasDetailPages = items.some((it) => it.listType === "detail_page");
   const zipUrl    = `/api/tasks/${taskId}/export/zip?planVersionId=${planVersionId}`;
   const stitchUrl = `/api/tasks/${taskId}/export/stitch?planVersionId=${planVersionId}`;
-
   return (
     <div className="mt-6 flex items-center gap-3 rounded-lg border border-zinc-100 bg-zinc-50 px-4 py-3">
       <p className="text-sm font-medium text-zinc-700">导出</p>
       <div className="ml-auto flex gap-2">
-        <a
-          href={zipUrl}
-          download="images-export.zip"
-          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50"
-        >
+        <a href={zipUrl} download="images-export.zip"
+          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50">
           <Download size={13} /> 打包下载 (ZIP)
         </a>
         {hasDetailPages && (
-          <a
-            href={stitchUrl}
-            download="detail-stitch.jpg"
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50"
-          >
+          <a href={stitchUrl} download="detail-stitch.jpg"
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50">
             <Rows2 size={13} /> 拼接详情页
           </a>
         )}
@@ -923,16 +1211,15 @@ function ExportToolbar({
   );
 }
 
+// ---------------------------------------------------------------------------
+// SortableItemRow
+// ---------------------------------------------------------------------------
 
 function SortableItemRow({
   id, item, index, presets, onChange, onRemove,
 }: {
-  id: string;
-  item: DraftItem;
-  index: number;
-  presets: OutputPreset[];
-  onChange: (patch: Partial<DraftItem>) => void;
-  onRemove: () => void;
+  id: string; item: DraftItem; index: number; presets: OutputPreset[];
+  onChange: (patch: Partial<DraftItem>) => void; onRemove: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
   const style: React.CSSProperties = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
@@ -949,20 +1236,13 @@ function SortableItemRow({
         }`}>
           {item.listType === "main_image" ? "主图" : "详情页"}
         </span>
-        <Input
-          className="flex-1 h-7 text-xs"
-          placeholder={`图片标题 ${index + 1}`}
-          value={item.title}
-          onChange={(e) => onChange({ title: e.target.value })}
-        />
+        <Input className="flex-1 h-7 text-xs" placeholder={`图片标题 ${index + 1}`}
+          value={item.title} onChange={(e) => onChange({ title: e.target.value })} />
         <button onClick={() => setExpanded(v => !v)} className="text-xs text-zinc-400 hover:text-zinc-700 px-1">
           {expanded ? "收起" : "展开"}
         </button>
-        <button onClick={onRemove} className="text-zinc-300 hover:text-red-500">
-          <X size={14} />
-        </button>
+        <button onClick={onRemove} className="text-zinc-300 hover:text-red-500"><X size={14} /></button>
       </div>
-
       {expanded && (
         <div className="border-t border-zinc-50 px-3 py-3 space-y-3">
           <div className="grid grid-cols-2 gap-3">
@@ -982,11 +1262,8 @@ function SortableItemRow({
             </div>
             <div className="flex flex-col gap-1">
               <Label className="text-xs text-zinc-500">输出预设</Label>
-              <select
-                className="h-7 rounded-md border border-zinc-200 bg-white px-2 text-xs text-zinc-900 focus:outline-none"
-                value={item.presetId ?? ""}
-                onChange={(e) => onChange({ presetId: e.target.value })}
-              >
+              <select className="h-7 rounded-md border border-zinc-200 bg-white px-2 text-xs text-zinc-900 focus:outline-none"
+                value={item.presetId ?? ""} onChange={(e) => onChange({ presetId: e.target.value })}>
                 <option value="">默认预设</option>
                 {presets.map(p => (
                   <option key={p.id} value={p.id}>{p.name} ({p.width}×{p.height})</option>
@@ -1000,57 +1277,140 @@ function SortableItemRow({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Step 1 — config: user ideas, plan count, image counts
+// ---------------------------------------------------------------------------
 
-
-function Step1({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
-  const [submitting, setSubmitting] = useState(false);
+function Step1({
+  task,
+  config,
+  setConfig,
+  onNext,
+}: {
+  task: GenerationTask;
+  config: Step1Config;
+  setConfig: (c: Step1Config) => void;
+  onNext: () => void;
+}) {
   const outputTypes: string[] = JSON.parse(task.outputTypes);
-
-  async function handleGenerate() {
-    setSubmitting(true);
-    try {
-      await api.post(`/tasks/${task.id}/generate-directions`, {});
-      toast.success("设计方向生成任务已提交");
-      onNext();
-    } catch {
-      toast.error("提交失败，请重试");
-      setSubmitting(false);
-    }
-  }
+  const hasMain   = outputTypes.includes("main_image");
+  const hasDetail = outputTypes.includes("detail_page");
 
   return (
     <div className="mx-auto max-w-lg px-8 py-10">
       <h2 className="mb-6 text-base font-medium text-zinc-900">任务配置确认</h2>
 
-      <div className="flex flex-col gap-4 rounded-lg border border-zinc-100 p-5 text-sm">
+      <div className="flex flex-col gap-5 rounded-lg border border-zinc-100 p-5 text-sm">
+        {/* Output types */}
         <div className="flex gap-3">
-          <span className="w-24 shrink-0 text-zinc-400">输出类型</span>
+          <span className="w-28 shrink-0 text-zinc-400">输出类型</span>
           <span className="text-zinc-900">
             {outputTypes.map(t => t === "main_image" ? "主图" : "详情页").join(" + ")}
           </span>
         </div>
-        <div className="flex gap-3">
-          <span className="w-24 shrink-0 text-zinc-400">竞品分析</span>
-          <span className="text-zinc-900">已关联</span>
+
+        {/* Image counts */}
+        {hasMain && (
+          <div className="flex items-center gap-3">
+            <span className="w-28 shrink-0 text-zinc-400">主图数量</span>
+            <div className="flex items-center gap-2">
+              {[2, 3, 4, 5, 6].map(n => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setConfig({ ...config, mainImageCount: n })}
+                  className={`flex h-7 w-7 items-center justify-center rounded-md text-sm transition-colors ${
+                    config.mainImageCount === n
+                      ? "bg-zinc-900 text-white"
+                      : "border border-zinc-200 text-zinc-600 hover:border-zinc-400"
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+              <span className="text-xs text-zinc-400">张</span>
+            </div>
+          </div>
+        )}
+        {hasDetail && (
+          <div className="flex items-center gap-3">
+            <span className="w-28 shrink-0 text-zinc-400">详情页数量</span>
+            <div className="flex items-center gap-2">
+              {[2, 3, 4, 5, 6].map(n => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setConfig({ ...config, detailImageCount: n })}
+                  className={`flex h-7 w-7 items-center justify-center rounded-md text-sm transition-colors ${
+                    config.detailImageCount === n
+                      ? "bg-zinc-900 text-white"
+                      : "border border-zinc-200 text-zinc-600 hover:border-zinc-400"
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+              <span className="text-xs text-zinc-400">张</span>
+            </div>
+          </div>
+        )}
+
+        {/* Plan count */}
+        <div className="flex items-center gap-3">
+          <span className="w-28 shrink-0 text-zinc-400">方案数量</span>
+          <div className="flex items-center gap-2">
+            {[2, 3, 4, 5].map(n => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => setConfig({ ...config, planCount: n })}
+                className={`flex h-7 w-7 items-center justify-center rounded-md text-sm transition-colors ${
+                  config.planCount === n
+                    ? "bg-zinc-900 text-white"
+                    : "border border-zinc-200 text-zinc-600 hover:border-zinc-400"
+                }`}
+              >
+                {n}
+              </button>
+            ))}
+            <span className="text-xs text-zinc-400">个设计方向</span>
+          </div>
         </div>
+
+        {/* User ideas */}
+        <div className="flex flex-col gap-1.5">
+          <span className="text-zinc-400">
+            创意方向参考
+            <span className="ml-1 text-xs font-normal">（选填，AI 将优先参考）</span>
+          </span>
+          <Textarea
+            rows={3}
+            placeholder="例如：想要高端简约的风格，主色调用深蓝色，突出产品质感…"
+            value={config.userIdeas}
+            onChange={(e) => setConfig({ ...config, userIdeas: e.target.value })}
+            className="text-sm"
+          />
+        </div>
+
+        {/* Competitor analysis note */}
         <div className="flex gap-3">
-          <span className="w-24 shrink-0 text-zinc-400">下一步</span>
-          <span className="text-zinc-500">AI 将基于竞品研究和商品信息生成3个差异化设计方向</span>
+          <span className="w-28 shrink-0 text-zinc-400">竞品分析</span>
+          <span className="text-zinc-500">已关联，AI 将基于竞品洞察生成差异化方向</span>
         </div>
       </div>
 
       <div className="mt-8 flex justify-end">
-        <Button onClick={handleGenerate} disabled={submitting}>
-          {submitting
-            ? <><Loader2 size={14} className="animate-spin" /> 提交中…</>
-            : <><Zap size={14} /> 生成设计方向</>}
+        <Button onClick={onNext}>
+          <Zap size={14} /> 生成设计方向
         </Button>
       </div>
     </div>
   );
 }
 
-
+// ---------------------------------------------------------------------------
+// TaskWizard root
+// ---------------------------------------------------------------------------
 
 export function TaskWizard() {
   const { taskId, step } = useParams<{ taskId: string; step: string }>();
@@ -1059,6 +1419,14 @@ export function TaskWizard() {
 
   const [task, setTask] = useState<GenerationTask | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // Config collected in Step 1, passed to Step 2 for SSE query params
+  const [step1Config, setStep1Config] = useState<Step1Config>({
+    userIdeas: "",
+    planCount: 3,
+    mainImageCount: 3,
+    detailImageCount: 3,
+  });
 
   useEffect(() => {
     if (!taskId) return;
@@ -1104,7 +1472,6 @@ export function TaskWizard() {
           {" / "}
           <span className="text-zinc-600">{typeLabel}</span>
         </p>
-        {/* Step indicator */}
         <ol className="flex items-center gap-0">
           {STEPS.map(({ n, label }, i) => {
             const done   = n < currentStep;
@@ -1128,8 +1495,21 @@ export function TaskWizard() {
 
       {/* Step content */}
       <div className="flex-1 overflow-y-auto">
-        {currentStep === 1 && <Step1 task={task} onNext={() => goStep(2)} />}
-        {currentStep === 2 && <Step2 task={task} onNext={() => goStep(3)} />}
+        {currentStep === 1 && (
+          <Step1
+            task={task}
+            config={step1Config}
+            setConfig={setStep1Config}
+            onNext={() => goStep(2)}
+          />
+        )}
+        {currentStep === 2 && (
+          <Step2
+            task={task}
+            config={step1Config}
+            onNext={() => goStep(3)}
+          />
+        )}
         {currentStep === 3 && <Step3 task={task} onNext={() => goStep(4)} />}
         {currentStep === 4 && <Step4 task={task} />}
       </div>

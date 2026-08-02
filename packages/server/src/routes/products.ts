@@ -351,6 +351,8 @@ productsRouter.post("/:id/tasks", async (c) => {
   const body = await c.req.json<{
     analysisVersionId: string;
     outputTypes: string[];  // ["main_image", "detail_page"]
+    name?: string;
+    description?: string;
   }>();
 
   const { generationTasks, modelSceneRoutes, modelProviders, outputPresets } =
@@ -372,6 +374,8 @@ productsRouter.post("/:id/tasks", async (c) => {
     productId,
     analysisVersionId: body.analysisVersionId,
     outputTypes: JSON.stringify(body.outputTypes),
+    name: body.name ?? null,
+    description: body.description ?? null,
     configSnapshot,
     currentStep: 1,
     createdAt: now,

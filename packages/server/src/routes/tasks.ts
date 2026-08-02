@@ -463,6 +463,10 @@ tasksRouter.patch("/:taskId/step", async (c) => {
 // GET /api/tasks/:taskId/generate-directions-stream — SSE: analyse images + stream LLM output + save directions
 tasksRouter.get("/:taskId/generate-directions-stream", (c) => {
   const taskId = c.req.param("taskId");
+  const userIdeas = c.req.query("userIdeas") ?? "";
+  const planCount = Math.min(5, Math.max(2, Number(c.req.query("planCount") ?? "3")));
+  const mainImageCount = Math.min(6, Math.max(1, Number(c.req.query("mainImageCount") ?? "3")));
+  const detailImageCount = Math.min(6, Math.max(1, Number(c.req.query("detailImageCount") ?? "3")));
 
   return streamSSE(c, async (stream) => {
     const emit = async (event: Record<string, unknown>) => {
@@ -569,15 +573,20 @@ tasksRouter.get("/:taskId/generate-directions-stream", (c) => {
       const outputTypeLabel = outputTypes.includes("main_image") && outputTypes.includes("detail_page")
         ? "主图 + 详情页" : outputTypes.includes("main_image") ? "主图" : "详情页";
       const imagesPerDirection = outputTypes.length > 1
-        ? "2-3张主图（listType: main_image）和2-3张详情页图（listType: detail_page）"
-        : outputTypes[0] === "main_image" ? "3-4张主图（listType: main_image）" : "3-4张详情页图（listType: detail_page）";
+        ? `${mainImageCount}张主图（listType: main_image）和${detailImageCount}张详情页图（listType: detail_page）`
+        : outputTypes[0] === "main_image"
+          ? `${mainImageCount}张主图（listType: main_image）`
+          : `${detailImageCount}张详情页图（listType: detail_page）`;
       const assetIdNote = validAssetIds.length > 0
         ? `可用的商品图片ID列表：${validAssetIds.join("、")}。每张图必须从这个列表中选择一个productAssetId。`
         : "暂无商品图片，productAssetId填null。";
+      const userIdeasSection = userIdeas.trim()
+        ? `\n\n【用户创意方向参考】\n${userIdeas.trim()}\n（请充分参考用户想法，但仍需生成${planCount}个差异化方向）`
+        : "";
 
-      const prompt = `请为以下商品设计3个差异化的视觉方向，用于生成${outputTypeLabel}图片。\n3个方向之间需有明显差异，例如：极简高端、温暖生活场景、数据驱动专业风。\n\n【商品信息】\n${productCtx}\n\n【商品图片视觉分析】\n${productImageCtx}\n\n【竞品分析洞察】\n${synthesisContent || "暂无竞品分析数据，请基于商品特性自行判断"}\n\n${assetIdNote}\n\n输出格式（严格JSON，只包含directions数组）：\n{\n  "directions": [\n    {\n      "label": "方向A — 简短主题名（6字以内）",\n      "positioning": "核心定位和目标受众（2-3句话）",\n      "colorScheme": "完整配色方案（主色+辅色+点缀色）",\n      "layoutIntent": "版式和构图策略",\n      "copyStrategy": "文案风格和主要卖点侧重",\n      "imageList": [\n        {\n          "listType": "main_image",\n          "productAssetId": "使用哪张商品图片的ID",\n          "title": "图片标题（8字以内）",\n          "description": "图片核心内容（30字以内）",\n          "sellingPoints": ["卖点1", "卖点2", "卖点3"],\n          "suggestedCopy": "建议主标题文案（10-15字）",\n          "compositionIntent": "详细构图描述",\n          "lighting": "完整光照方案",\n          "angle": "精确拍摄视角",\n          "background": "背景详细描述",\n          "mood": "视觉情绪描述（3-6个形容词）",\n          "visualElements": "画面中所有视觉元素清单"\n        }\n      ]\n    }\n  ]\n}\n\n要求：每个方向生成${imagesPerDirection}；只输出JSON`;
+      const prompt = `请为以下商品设计${planCount}个差异化的视觉方向，用于生成${outputTypeLabel}图片。\n${planCount}个方向之间需有明显差异，例如：极简高端、温暖生活场景、数据驱动专业风。\n\n【商品信息】\n${productCtx}\n\n【商品图片视觉分析】\n${productImageCtx}\n\n【竞品分析洞察】\n${synthesisContent || "暂无竞品分析数据，请基于商品特性自行判断"}${userIdeasSection}\n\n${assetIdNote}\n\n输出格式（严格JSON，只包含directions数组）：\n{\n  "directions": [\n    {\n      "label": "方向A — 简短主题名（6字以内）",\n      "positioning": "核心定位和目标受众（2-3句话）",\n      "colorScheme": "完整配色方案（主色+辅色+点缀色）",\n      "layoutIntent": "版式和构图策略",\n      "copyStrategy": "文案风格和主要卖点侧重",\n      "imageList": [\n        {\n          "listType": "main_image",\n          "productAssetId": "使用哪张商品图片的ID",\n          "title": "图片标题（8字以内）",\n          "description": "图片核心内容（30字以内）",\n          "sellingPoints": ["卖点1", "卖点2", "卖点3"],\n          "suggestedCopy": "建议主标题文案（10-15字）",\n          "compositionIntent": "详细构图描述",\n          "lighting": "完整光照方案",\n          "angle": "精确拍摄视角",\n          "background": "背景详细描述",\n          "mood": "视觉情绪描述（3-6个形容词）",\n          "visualElements": "画面中所有视觉元素清单"\n        }\n      ]\n    }\n  ]\n}\n\n要求：每个方向生成${imagesPerDirection}；只输出JSON`;
 
-      const SYSTEM_PROMPT = `你是一位顶级的电商视觉创意总监，擅长将商品特性与竞品洞察转化为可落地执行的视觉方案。请基于提供的商品信息和竞品分析，生成3个差异化设计方向，以严格的JSON格式输出，不包含任何其他内容。每个方向的图片列表需要包含非常丰富的视觉细节，以便直接驱动AI图片生成。`;
+      const SYSTEM_PROMPT = `你是一位顶级的电商视觉创意总监，擅长将商品特性与竞品洞察转化为可落地执行的视觉方案。请基于提供的商品信息和竞品分析，生成${planCount}个差异化设计方向，以严格的JSON格式输出，不包含任何其他内容。每个方向的图片列表需要包含非常丰富的视觉细节，以便直接驱动AI图片生成。`;
 
       // ── 5. Stream LLM output ──────────────────────────────────────────
       await emit({ type: "step", text: "正在生成设计方向，AI 思考中…" });
@@ -606,7 +615,7 @@ tasksRouter.get("/:taskId/generate-directions-stream", (c) => {
         };
         if (Array.isArray(parsed.directions)) {
           const now = new Date();
-          for (const dir of parsed.directions.slice(0, 3)) {
+          for (const dir of parsed.directions.slice(0, planCount)) {
             await db.insert(designDirections).values({
               id: randomUUID(),
               generationTaskId: taskId,
@@ -615,7 +624,7 @@ tasksRouter.get("/:taskId/generate-directions-stream", (c) => {
               createdAt: now,
             });
           }
-          directions = parsed.directions.slice(0, 3).map(d => ({
+          directions = parsed.directions.slice(0, planCount).map(d => ({
             label: d.label ?? "未命名方向",
             content: JSON.stringify(d),
           }));
@@ -681,7 +690,73 @@ tasksRouter.patch("/:taskId/direction", async (c) => {
   return c.json({ ok: true });
 });
 
-// POST /api/tasks/:taskId/plan — commit plan version + image items
+// POST /api/tasks/directions/:directionId/chat — chat with a design direction to refine it
+tasksRouter.post("/directions/:directionId/chat", async (c) => {
+  const directionId = c.req.param("directionId");
+  const body = await c.req.json<{
+    message: string;
+    history: Array<{ role: "user" | "assistant"; content: string }>;
+  }>();
+
+  const [dir] = await db
+    .select()
+    .from(designDirections)
+    .where(eq(designDirections.id, directionId));
+  if (!dir) return c.json({ error: "Not found" }, 404);
+
+  const { gatewayCall } = await import("../gateway/index.js");
+
+  const dirContent = (() => { try { return JSON.parse(dir.content) as Record<string, unknown>; } catch { return {}; } })();
+  const systemPrompt = `你是一位电商视觉设计顾问。当前正在讨论的设计方向如下：
+
+方向名称：${dir.label}
+定位：${dirContent["positioning"] ?? ""}
+配色方案：${dirContent["colorScheme"] ?? ""}
+版式策略：${dirContent["layoutIntent"] ?? ""}
+文案策略：${dirContent["copyStrategy"] ?? ""}
+图片数量：${Array.isArray(dirContent["imageList"]) ? (dirContent["imageList"] as unknown[]).length : 0} 张
+
+请根据用户的反馈帮助优化这个设计方向。如果用户要求修改方向内容，请在回复末尾附上更新后的完整JSON（使用代码块包裹，格式与原始方向一致，包含label/positioning/colorScheme/layoutIntent/copyStrategy/imageList）。如果用户只是询问或讨论，正常回答即可，无需输出JSON。`;
+
+  // Flatten multi-turn history into a single prompt string
+  const historyText = body.history.length > 0
+    ? body.history.map(h => `${h.role === "user" ? "用户" : "助手"}：${h.content}`).join("\n\n") + "\n\n"
+    : "";
+  const prompt = `${historyText}用户：${body.message}`;
+
+  let replyText = "";
+  try {
+    const result = await gatewayCall("design_plan", {
+      scene: "design_plan",
+      systemPrompt,
+      prompt,
+    });
+    replyText = result.text ?? "";
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "LLM 调用失败" }, 500);
+  }
+
+  // Try to extract updated JSON content from the reply (wrapped in ```json ... ```)
+  let updatedContent: Record<string, unknown> | null = null;
+  const jsonMatch = replyText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[1]!) as Record<string, unknown>;
+      if (parsed["label"] || parsed["positioning"] || parsed["imageList"]) {
+        updatedContent = parsed;
+        // Persist updated content to DB
+        await db
+          .update(designDirections)
+          .set({ content: JSON.stringify(updatedContent) })
+          .where(eq(designDirections.id, directionId));
+      }
+    } catch { /* ignore parse errors */ }
+  }
+
+  return c.json({ reply: replyText, updatedContent });
+});
+
+
 tasksRouter.post("/:taskId/plan", async (c) => {
   const taskId = c.req.param("taskId");
   const [task] = await db.select().from(generationTasks).where(eq(generationTasks.id, taskId));

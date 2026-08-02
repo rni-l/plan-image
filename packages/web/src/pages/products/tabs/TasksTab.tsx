@@ -4,7 +4,9 @@ import { Plus, Loader2, ChevronRight, Layers } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
   DialogContent,
@@ -27,6 +29,8 @@ interface AnalysisVersion {
 
 interface GenerationTask {
   id: string;
+  name: string | null;
+  description: string | null;
   outputTypes: string;   // JSON array
   currentStep: number;
   createdAt: number;
@@ -129,9 +133,13 @@ function TaskRow({ task, onClick }: { task: GenerationTask; onClick: () => void 
       className="flex items-center gap-4 rounded-lg border border-zinc-100 bg-white px-4 py-3 text-left transition-shadow hover:shadow-sm"
     >
       <Layers size={16} className="shrink-0 text-zinc-400" />
-      <div className="flex-1">
-        <p className="text-sm font-medium text-zinc-900">{typeLabel} 成图任务</p>
-        <p className="mt-0.5 text-xs text-zinc-400">{date} 创建</p>
+      <div className="flex-1 min-w-0">
+        <p className="truncate text-sm font-medium text-zinc-900">
+          {task.name ? task.name : `${typeLabel} 成图任务`}
+        </p>
+        <p className="mt-0.5 text-xs text-zinc-400">
+          {typeLabel} · {date} 创建
+        </p>
       </div>
       <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${
         task.currentStep === 4
@@ -164,10 +172,17 @@ function NewTaskDialog({
 }) {
   const [analysisVersionId, setAnalysisVersionId] = useState(versions[0]?.id ?? "");
   const [outputTypes, setOutputTypes] = useState<string[]>(["main_image"]);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (open && versions[0]) setAnalysisVersionId(versions[0].id);
+    if (open) {
+      if (versions[0]) setAnalysisVersionId(versions[0].id);
+      setName("");
+      setDescription("");
+      setOutputTypes(["main_image"]);
+    }
   }, [open, versions]);
 
   function toggleType(t: string) {
@@ -184,6 +199,8 @@ function NewTaskDialog({
       const task = await api.post<GenerationTask>(`/products/${productId}/tasks`, {
         analysisVersionId,
         outputTypes,
+        name: name.trim() || undefined,
+        description: description.trim() || undefined,
       });
       onCreated(task);
     } catch {
@@ -202,6 +219,36 @@ function NewTaskDialog({
           </DialogHeader>
 
           <div className="flex flex-col gap-5">
+            {/* Task name (optional) */}
+            <div className="flex flex-col gap-1.5">
+              <Label>
+                任务名称
+                <span className="ml-1 text-zinc-400 font-normal text-xs">（选填）</span>
+              </Label>
+              <Input
+                placeholder="如：618主推款主图"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                maxLength={50}
+              />
+            </div>
+
+            {/* Task description (optional) */}
+            <div className="flex flex-col gap-1.5">
+              <Label>
+                任务说明
+                <span className="ml-1 text-zinc-400 font-normal text-xs">（选填）</span>
+              </Label>
+              <Textarea
+                placeholder="简要描述任务目标或备注信息…"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                rows={2}
+                maxLength={200}
+                className="text-sm"
+              />
+            </div>
+
             {/* Analysis version */}
             <div className="flex flex-col gap-1.5">
               <Label>关联竞品分析版本</Label>

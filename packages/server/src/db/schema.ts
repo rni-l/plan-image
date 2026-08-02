@@ -122,6 +122,10 @@ export const generationTasks = sqliteTable("generation_tasks", {
     .references(() => analysisVersions.id),
   /** JSON array: e.g. ["main_image", "detail_page"] */
   outputTypes: text("output_types").notNull(),
+  /** Optional user-defined task name */
+  name: text("name"),
+  /** Optional user-defined task description */
+  description: text("description"),
   /** Frozen snapshot of model routing + output presets at creation time */
   configSnapshot: text("config_snapshot").notNull(),
   currentStep: integer("current_step").notNull().default(1),
