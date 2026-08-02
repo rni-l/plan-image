@@ -196,9 +196,9 @@ export function ResearchTab({ productId }: { productId: string }) {
       {versions.length === 0 ? (
         <EmptyResearch onUpload={() => setSheetOpen(true)} onAnalyze={handleAnalyze} hasAssets={assets.length > 0} />
       ) : (
-        <div className="flex flex-1 overflow-hidden">
-          {/* Left: analysis cards */}
-          <div className="flex-1 overflow-y-auto px-8 py-6">
+        <div className="flex flex-1 flex-col overflow-y-auto">
+          {/* Analysis cards */}
+          <div className="px-8 py-6">
             {analyzing && cards.length === 0 ? (
               <div className="grid grid-cols-2 gap-3">
                 {Array.from({ length: 4 }).map((_, i) => (
@@ -227,8 +227,8 @@ export function ResearchTab({ productId }: { productId: string }) {
             )}
           </div>
 
-          {/* Right: synthesis report */}
-          <div className="w-[38%] shrink-0 overflow-y-auto border-l border-zinc-100 px-5 py-6">
+          {/* Synthesis report */}
+          <div className="border-t border-zinc-100 px-8 py-6">
             <SynthesisPanel
               report={report}
               synthesizing={synthesizing}

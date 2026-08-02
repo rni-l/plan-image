@@ -12,6 +12,43 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 
 // ---------------------------------------------------------------------------
+// Generated image strip (lazy-loaded for step-4 tasks)
+// ---------------------------------------------------------------------------
+
+interface PreviewImage { itemId: string; filePath: string; title: string }
+
+function TaskImageStrip({ taskId }: { taskId: string }) {
+  const [images, setImages] = useState<PreviewImage[] | null>(null);
+
+  useEffect(() => {
+    api
+      .get<{ images: PreviewImage[] }>(`/tasks/${taskId}/preview-images`)
+      .then((res) => setImages(res.images))
+      .catch(() => setImages([]));
+  }, [taskId]);
+
+  if (!images || images.length === 0) return null;
+
+  return (
+    <div className="flex gap-2 overflow-x-auto border-t border-zinc-50 px-4 pb-3 pt-2">
+      {images.slice(0, 6).map((img) => (
+        <div
+          key={img.itemId}
+          className="h-16 w-16 shrink-0 overflow-hidden rounded-md bg-zinc-100"
+          title={img.title}
+        >
+          <img
+            src={`/api/products/assets/file?path=${encodeURIComponent(img.filePath)}`}
+            alt={img.title}
+            className="h-full w-full object-cover"
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -19,6 +56,8 @@ interface TaskRow {
   id: string;
   productId: string;
   productName: string;
+  name: string | null;
+  description: string | null;
   outputTypes: string; // JSON array: ("main_image" | "detail_page")[]
   currentStep: number;
   createdAt: number;
@@ -57,31 +96,43 @@ function fmtDate(ts: number) {
 function TaskCard({ task, onClick }: { task: TaskRow; onClick: () => void }) {
   const isDone = task.currentStep === 4;
   const stepLabel = STEP_LABELS[task.currentStep] ?? `步骤 ${task.currentStep}`;
+  const title = task.name ?? task.productName;
 
   return (
     <button
       onClick={onClick}
-      className="flex w-full items-center gap-4 rounded-lg border border-zinc-100 bg-white px-4 py-3 text-left transition-shadow hover:shadow-sm"
+      className="flex w-full flex-col rounded-lg border border-zinc-100 bg-white text-left transition-shadow hover:shadow-sm"
     >
-      <Layers size={16} className="shrink-0 text-zinc-400" />
+      <div className="flex items-center gap-4 px-4 py-3">
+        <Layers size={16} className="shrink-0 text-zinc-400" />
 
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-zinc-900">
-          {task.productName}
-        </p>
-        <p className="mt-0.5 text-xs text-zinc-400">
-          {typeLabel(task.outputTypes)} · 更新于 {fmtDate(task.updatedAt)}
-        </p>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-zinc-900">{title}</p>
+          {task.description ? (
+            <>
+              <p className="mt-0.5 truncate text-xs text-zinc-500">{task.description}</p>
+              <p className="mt-0.5 text-xs text-zinc-400">
+                {typeLabel(task.outputTypes)} · 更新于 {fmtDate(task.updatedAt)}
+              </p>
+            </>
+          ) : (
+            <p className="mt-0.5 text-xs text-zinc-400">
+              {typeLabel(task.outputTypes)} · 更新于 {fmtDate(task.updatedAt)}
+            </p>
+          )}
+        </div>
+
+        <Badge
+          variant={isDone ? "succeeded" : "running"}
+          className="shrink-0 text-xs"
+        >
+          {stepLabel}
+        </Badge>
+
+        <ChevronRight size={14} className="shrink-0 text-zinc-300" />
       </div>
 
-      <Badge
-        variant={isDone ? "succeeded" : "running"}
-        className="shrink-0 text-xs"
-      >
-        {stepLabel}
-      </Badge>
-
-      <ChevronRight size={14} className="shrink-0 text-zinc-300" />
+      {isDone && <TaskImageStrip taskId={task.id} />}
     </button>
   );
 }

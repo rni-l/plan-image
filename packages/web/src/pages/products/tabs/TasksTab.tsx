@@ -38,6 +38,39 @@ interface GenerationTask {
   analysisVersionId: string;
 }
 
+interface PreviewImage { itemId: string; filePath: string; title: string }
+
+function TaskImageStrip({ taskId }: { taskId: string }) {
+  const [images, setImages] = useState<PreviewImage[] | null>(null);
+
+  useEffect(() => {
+    api
+      .get<{ images: PreviewImage[] }>(`/tasks/${taskId}/preview-images`)
+      .then((res) => setImages(res.images))
+      .catch(() => setImages([]));
+  }, [taskId]);
+
+  if (!images || images.length === 0) return null;
+
+  return (
+    <div className="flex gap-2 overflow-x-auto border-t border-zinc-50 px-4 pb-3 pt-2">
+      {images.slice(0, 6).map((img) => (
+        <div
+          key={img.itemId}
+          className="h-14 w-14 shrink-0 overflow-hidden rounded bg-zinc-100"
+          title={img.title}
+        >
+          <img
+            src={`/api/products/assets/file?path=${encodeURIComponent(img.filePath)}`}
+            alt={img.title}
+            className="h-full w-full object-cover"
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 const STEP_LABELS: Record<number, string> = {
   1: "选择配置",
   2: "设计方向",
@@ -126,29 +159,35 @@ function TaskRow({ task, onClick }: { task: GenerationTask; onClick: () => void 
   const typeLabel = types.map(t => t === "main_image" ? "主图" : "详情页").join(" + ");
   const date = new Date(task.createdAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
   const stepLabel = STEP_LABELS[task.currentStep] ?? `步骤${task.currentStep}`;
+  const isDone = task.currentStep === 4;
 
   return (
     <button
       onClick={onClick}
-      className="flex items-center gap-4 rounded-lg border border-zinc-100 bg-white px-4 py-3 text-left transition-shadow hover:shadow-sm"
+      className="flex w-full flex-col rounded-lg border border-zinc-100 bg-white text-left transition-shadow hover:shadow-sm"
     >
-      <Layers size={16} className="shrink-0 text-zinc-400" />
-      <div className="flex-1 min-w-0">
-        <p className="truncate text-sm font-medium text-zinc-900">
-          {task.name ? task.name : `${typeLabel} 成图任务`}
-        </p>
-        <p className="mt-0.5 text-xs text-zinc-400">
-          {typeLabel} · {date} 创建
-        </p>
+      <div className="flex items-center gap-4 px-4 py-3">
+        <Layers size={16} className="shrink-0 text-zinc-400" />
+        <div className="flex-1 min-w-0">
+          <p className="truncate text-sm font-medium text-zinc-900">
+            {task.name ? task.name : `${typeLabel} 成图任务`}
+          </p>
+          {task.description && (
+            <p className="mt-0.5 truncate text-xs text-zinc-500">{task.description}</p>
+          )}
+          <p className="mt-0.5 text-xs text-zinc-400">
+            {typeLabel} · {date} 创建
+          </p>
+        </div>
+        <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${
+          isDone ? "bg-green-50 text-green-700" : "bg-zinc-100 text-zinc-600"
+        }`}>
+          {stepLabel}
+        </span>
+        <ChevronRight size={14} className="shrink-0 text-zinc-300" />
       </div>
-      <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${
-        task.currentStep === 4
-          ? "bg-green-50 text-green-700"
-          : "bg-zinc-100 text-zinc-600"
-      }`}>
-        {stepLabel}
-      </span>
-      <ChevronRight size={14} className="shrink-0 text-zinc-300" />
+
+      {isDone && <TaskImageStrip taskId={task.id} />}
     </button>
   );
 }

@@ -46,6 +46,8 @@ tasksRouter.get("/", async (c) => {
         id:          generationTasks.id,
         productId:   generationTasks.productId,
         productName: products.name,
+        name:        generationTasks.name,
+        description: generationTasks.description,
         outputTypes: generationTasks.outputTypes,
         currentStep: generationTasks.currentStep,
         createdAt:   generationTasks.createdAt,
@@ -415,6 +417,42 @@ tasksRouter.get("/:taskId/export/stitch", async (c) => {
 // ---------------------------------------------------------------------------
 // Task-scoped routes
 // ---------------------------------------------------------------------------
+
+// GET /api/tasks/:taskId/preview-images — 返回最新方案版本中已生成的缩略图路径（最多6张）
+tasksRouter.get("/:taskId/preview-images", async (c) => {
+  const taskId = c.req.param("taskId");
+
+  const [latest] = await db
+    .select()
+    .from(designPlanVersions)
+    .where(eq(designPlanVersions.generationTaskId, taskId))
+    .orderBy(desc(designPlanVersions.versionNumber))
+    .limit(1);
+
+  if (!latest) return c.json({ images: [] });
+
+  const itemList = await db
+    .select()
+    .from(imageItems)
+    .where(eq(imageItems.designPlanVersionId, latest.id))
+    .orderBy(imageItems.listType, imageItems.sortOrder)
+    .limit(6);
+
+  const images: Array<{ itemId: string; filePath: string; title: string }> = [];
+  for (const item of itemList) {
+    const vs = await db
+      .select()
+      .from(imageVersions)
+      .where(eq(imageVersions.imageItemId, item.id))
+      .orderBy(desc(imageVersions.createdAt));
+    const selected = vs.find((v) => v.isSelected) ?? vs[0];
+    if (selected?.filePath) {
+      images.push({ itemId: item.id, filePath: selected.filePath, title: item.title });
+    }
+  }
+
+  return c.json({ images });
+});
 
 // GET /api/tasks/:taskId
 tasksRouter.get("/:taskId", async (c) => {

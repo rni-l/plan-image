@@ -271,15 +271,15 @@ export function ProductInfoTab({
 
   return (
     <div className="flex h-full flex-col">
-      {/* ── Grid: left image area + right form ─────────────────────── */}
-      <div className="grid min-h-0 flex-1 grid-cols-[40%_60%] gap-8 overflow-hidden px-8 py-6 pr-16">
+      {/* ── Vertical layout: images on top, form below ─────────────── */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-8 py-6 pr-16">
 
-        {/* Left: image grid with analysis cards */}
-        <div className="overflow-y-auto">
+        {/* Top: image grid */}
+        <div className="mb-8">
           <Label className="mb-3 block text-zinc-700">商品参考图</Label>
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
             <SortableContext items={assets.map((a) => a.id)} strategy={rectSortingStrategy}>
-              <div className="flex flex-col gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 {assets.map((asset) => (
                   <AssetCard
                     key={asset.id}
@@ -296,8 +296,8 @@ export function ProductInfoTab({
           </DndContext>
         </div>
 
-        {/* Right: form */}
-        <div className="flex min-h-0 flex-col gap-6 overflow-y-auto pr-1">
+        {/* Bottom: form */}
+        <div className="flex flex-col gap-6">
           {/* Name + AI extract trigger */}
           <div className="flex items-end gap-3">
             <div className="flex flex-1 flex-col gap-1.5">
