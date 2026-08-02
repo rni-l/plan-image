@@ -1,5 +1,6 @@
 # Superpowers / tooling
 .superpowers/
+.worktrees/
 
 # Runtime data — never commit
 .data/
