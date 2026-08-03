@@ -3,12 +3,18 @@ import { imageItems, imageVersions } from "../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { gatewayCall } from "../../gateway/index.js";
 import { saveImageAsset } from "../../lib/storage.js";
-import { loadPromptContext } from "../../lib/image-prompt.js";
+import { buildImageGenerationPromptData } from "../../lib/prompt-service.js";
 import { randomUUID } from "node:crypto";
 
 export interface ImageGenerationInput {
   imageItemId: string;
   planVersionId: string;
+  finalPrompt: string;
+  promptTemplateId: string | null;
+  polishInstruction: string | null;
+  width: number;
+  height: number;
+  generationType: "initial" | "regeneration";
 }
 
 export async function handleImageGeneration(
@@ -17,18 +23,19 @@ export async function handleImageGeneration(
 ): Promise<void> {
   const input = inputRaw as ImageGenerationInput;
 
-  const { prompt, width, height, productImageBase64 } = await loadPromptContext(input.imageItemId);
+  if (!input.finalPrompt) throw new Error("图片生成任务缺少冻结 Prompt 快照");
+  const { productImageBase64 } = await buildImageGenerationPromptData(input.imageItemId);
 
   // Call image generation via gateway, passing the product photo as a reference image
   const response = await gatewayCall(
     "image_generation",
     {
       scene: "image_generation",
-      prompt,
+      prompt: input.finalPrompt,
       ...(productImageBase64 ? { images: [productImageBase64] } : {}),
       parameters: {
         task_type: "image_gen",
-        size: `${width}x${height}`,
+        size: `${input.width}x${input.height}`,
         n: 1,
       },
     },
@@ -58,11 +65,14 @@ export async function handleImageGeneration(
     imageItemId: input.imageItemId,
     filePath: saved.relativePath,
     checksum: saved.checksum,
-    generationType: "initial",
+    generationType: input.generationType,
     parentVersionId: null,
     jobId,
     maskPath: null,
     instruction: null,
+    promptTemplateId: input.promptTemplateId,
+    finalPrompt: input.finalPrompt,
+    polishInstruction: input.polishInstruction,
     isSelected: true,
     createdAt: now,
   });
@@ -73,4 +83,3 @@ export async function handleImageGeneration(
     .set({ updatedAt: now })
     .where(eq(imageItems.id, input.imageItemId));
 }
-

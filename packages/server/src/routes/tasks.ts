@@ -13,13 +13,15 @@ import {
   imageVersions,
   outputPresets,
   products,
+  backgroundJobs,
+  promptTemplates,
 } from "../db/schema.js";
-import { eq, desc, max, lt, and, sql } from "drizzle-orm";
+import { eq, desc, max, lt, and, sql, inArray, isNotNull } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { enqueueJob } from "../jobs/worker.js";
 import { paths, assetPath } from "../lib/paths.js";
 import { gatewayStream, gatewayTextStream } from "../gateway/index.js";
-import { loadPromptContext } from "../lib/image-prompt.js";
+import { renderDesignPlanPromptSnapshot, renderImageGenerationPromptSnapshot, validatePolishInstruction } from "../lib/prompt-service.js";
 import { saveImageAsset } from "../lib/storage.js";
 
 const execFileAsync = promisify(execFile);
@@ -190,47 +192,116 @@ tasksRouter.post("/items/:itemId/retry", async (c) => {
   const [item] = await db.select().from(imageItems).where(eq(imageItems.id, itemId));
   if (!item) return c.json({ error: "Not found" }, 404);
 
+  const [active] = await db.select({ id: backgroundJobs.id }).from(backgroundJobs).where(and(
+    eq(backgroundJobs.entityType, "image_item"),
+    eq(backgroundJobs.entityId, itemId),
+    inArray(backgroundJobs.status, ["queued", "running"]),
+  )).limit(1);
+  if (active) return c.json({ error: "该图片已有正在进行的生成任务" }, 409);
+
+  const rendered = await renderImageGenerationPromptSnapshot({ imageItemId: itemId });
+  const [latestVersion] = await db.select({ id: imageVersions.id }).from(imageVersions)
+    .where(eq(imageVersions.imageItemId, itemId)).limit(1);
   const jobId = await enqueueJob({
     type: "image_generation",
     entityType: "image_item",
     entityId: itemId,
-    inputSnapshot: { imageItemId: itemId, planVersionId: item.designPlanVersionId },
+    inputSnapshot: {
+      imageItemId: itemId,
+      planVersionId: item.designPlanVersionId,
+      finalPrompt: rendered.finalPrompt,
+      promptTemplateId: rendered.templateId,
+      polishInstruction: null,
+      width: rendered.width,
+      height: rendered.height,
+      generationType: latestVersion ? "regeneration" : "initial",
+    },
   });
 
   return c.json({ jobId }, 201);
 });
 
-// GET /api/tasks/items/:itemId/generate-stream
-// SSE endpoint — streams progressive image frames while generating, then saves the result.
-tasksRouter.get("/items/:itemId/generate-stream", (c) => {
+// POST /api/tasks/items/:itemId/generate-stream
+// Request-body SSE endpoint: freezes the submitted prompt, creates a traceable
+// running job, streams previews, and only writes a version after final success.
+tasksRouter.post("/items/:itemId/generate-stream", async (c) => {
   const itemId = c.req.param("itemId");
+  const body: {
+    templateId?: string | null;
+    editablePrompt?: string;
+    polishInstruction?: string | null;
+  } = await c.req.json<{
+    templateId?: string | null;
+    editablePrompt?: string;
+    polishInstruction?: string | null;
+  }>().catch(() => ({}));
+
+  const [item] = await db.select().from(imageItems).where(eq(imageItems.id, itemId));
+  if (!item) return c.json({ error: "图片项不存在" }, 404);
+  const [active] = await db.select({ id: backgroundJobs.id }).from(backgroundJobs).where(and(
+    eq(backgroundJobs.entityType, "image_item"),
+    eq(backgroundJobs.entityId, itemId),
+    inArray(backgroundJobs.status, ["queued", "running"]),
+  )).limit(1);
+  if (active) return c.json({ error: "该图片已有正在进行的生成任务" }, 409);
+
+  let polishInstruction: string | null = null;
+  try {
+    polishInstruction = body.polishInstruction ? validatePolishInstruction(body.polishInstruction) : null;
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+
+  let rendered: Awaited<ReturnType<typeof renderImageGenerationPromptSnapshot>>;
+  try {
+    rendered = await renderImageGenerationPromptSnapshot({
+      imageItemId: itemId,
+      ...(body.templateId !== undefined ? { templateId: body.templateId } : {}),
+      ...(body.editablePrompt !== undefined ? { editablePrompt: body.editablePrompt } : {}),
+    });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 422);
+  }
+
+  const [existingVersion] = await db.select({ id: imageVersions.id }).from(imageVersions)
+    .where(eq(imageVersions.imageItemId, itemId)).limit(1);
+  const generationType = existingVersion ? "regeneration" as const : "initial" as const;
+  const jobId = randomUUID();
+  await db.insert(backgroundJobs).values({
+    id: jobId,
+    type: "image_generation",
+    status: "running",
+    entityType: "image_item",
+    entityId: itemId,
+    inputSnapshot: JSON.stringify({
+      imageItemId: itemId,
+      planVersionId: item.designPlanVersionId,
+      finalPrompt: rendered.finalPrompt,
+      promptTemplateId: rendered.templateId,
+      polishInstruction,
+      width: rendered.width,
+      height: rendered.height,
+      generationType,
+    }),
+    startedAt: new Date(),
+    createdAt: new Date(),
+  });
 
   return streamSSE(c, async (stream) => {
     try {
-      // Verify item exists before opening the stream
-      const [item] = await db.select().from(imageItems).where(eq(imageItems.id, itemId));
-      if (!item) {
-        await stream.writeSSE({
-          data: JSON.stringify({ type: "error", message: "图片项不存在" }),
-          event: "message",
-        });
-        return;
-      }
-
-      const ctx = await loadPromptContext(itemId);
       let lastB64 = "";
 
       // Stream progressive frames from the model, passing the product photo as reference
       for await (const chunk of gatewayStream("image_generation", {
         scene: "image_generation",
-        prompt: ctx.prompt,
-        ...(ctx.productImageBase64 ? { images: [ctx.productImageBase64] } : {}),
+        prompt: rendered.finalPrompt,
+        ...(rendered.productImageBase64 ? { images: [rendered.productImageBase64] } : {}),
         parameters: {
           task_type: "image_gen",
-          size: `${ctx.width}x${ctx.height}`,
+          size: `${rendered.width}x${rendered.height}`,
           n: 1,
         },
-      })) {
+      }, jobId)) {
         lastB64 = chunk.b64;
         await stream.writeSSE({
           data: JSON.stringify({ type: "progress", b64: chunk.b64 }),
@@ -239,49 +310,45 @@ tasksRouter.get("/items/:itemId/generate-stream", (c) => {
         if (chunk.done) break;
       }
 
-      // Persist the final frame as a new image version
-      if (lastB64) {
-        const buffer = Buffer.from(lastB64, "base64");
-        const assetId = randomUUID();
-        const saved = await saveImageAsset(buffer, assetId, "generated");
-        const now = new Date();
+      if (!lastB64) throw new Error("模型未返回图片数据");
+      const buffer = Buffer.from(lastB64, "base64");
+      const assetId = randomUUID();
+      const saved = await saveImageAsset(buffer, assetId, "generated");
+      const now = new Date();
 
-        await db
-          .update(imageVersions)
-          .set({ isSelected: false })
-          .where(eq(imageVersions.imageItemId, itemId));
-
-        await db.insert(imageVersions).values({
-          id: assetId,
-          imageItemId: itemId,
-          filePath: saved.relativePath,
-          checksum: saved.checksum,
-          generationType: "initial",
-          parentVersionId: null,
-          jobId: null,
-          maskPath: null,
-          instruction: null,
-          isSelected: true,
-          createdAt: now,
-        });
-
-        await db
-          .update(imageItems)
-          .set({ updatedAt: now })
-          .where(eq(imageItems.id, itemId));
-
-        await stream.writeSSE({
-          data: JSON.stringify({ type: "done", versionId: assetId }),
-          event: "message",
-        });
-      } else {
-        await stream.writeSSE({
-          data: JSON.stringify({ type: "error", message: "模型未返回图片数据" }),
-          event: "message",
-        });
-      }
+      await db.update(imageVersions).set({ isSelected: false })
+        .where(eq(imageVersions.imageItemId, itemId));
+      await db.insert(imageVersions).values({
+        id: assetId,
+        imageItemId: itemId,
+        filePath: saved.relativePath,
+        checksum: saved.checksum,
+        generationType,
+        parentVersionId: null,
+        jobId,
+        maskPath: null,
+        instruction: null,
+        promptTemplateId: rendered.templateId,
+        finalPrompt: rendered.finalPrompt,
+        polishInstruction,
+        isSelected: true,
+        createdAt: now,
+      });
+      await db.update(imageItems).set({ updatedAt: now }).where(eq(imageItems.id, itemId));
+      await db.update(backgroundJobs).set({ status: "succeeded", finishedAt: now })
+        .where(eq(backgroundJobs.id, jobId));
+      await stream.writeSSE({
+        data: JSON.stringify({ type: "done", versionId: assetId, jobId }),
+        event: "message",
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      await db.update(backgroundJobs).set({
+        status: "failed",
+        errorType: "unknown",
+        errorMessage: message,
+        finishedAt: new Date(),
+      }).where(eq(backgroundJobs.id, jobId));
       await stream.writeSSE({
         data: JSON.stringify({ type: "error", message }),
         event: "message",
@@ -498,18 +565,34 @@ tasksRouter.patch("/:taskId/step", async (c) => {
   return c.body(null, 204);
 });
 
-// GET /api/tasks/:taskId/generate-directions-stream — SSE: analyse images + stream LLM output + save directions
-tasksRouter.get("/:taskId/generate-directions-stream", (c) => {
+// POST /api/tasks/:taskId/generate-directions-stream — request-body SSE
+tasksRouter.post("/:taskId/generate-directions-stream", async (c) => {
   const taskId = c.req.param("taskId");
-  const userIdeas = c.req.query("userIdeas") ?? "";
-  const planCount = Math.min(5, Math.max(2, Number(c.req.query("planCount") ?? "3")));
-  const mainImageCount = Math.min(6, Math.max(1, Number(c.req.query("mainImageCount") ?? "3")));
-  const detailImageCount = Math.min(6, Math.max(1, Number(c.req.query("detailImageCount") ?? "3")));
+  const body: {
+    userIdeas?: string;
+    planCount?: number;
+    mainImageCount?: number;
+    detailImageCount?: number;
+    templateId?: string | null;
+    editablePrompt?: string;
+  } = await c.req.json<{
+    userIdeas?: string;
+    planCount?: number;
+    mainImageCount?: number;
+    detailImageCount?: number;
+    templateId?: string | null;
+    editablePrompt?: string;
+  }>().catch(() => ({}));
+  const userIdeas = body.userIdeas ?? "";
+  const planCount = Math.min(5, Math.max(2, Number(body.planCount ?? 3)));
+  const mainImageCount = Math.min(6, Math.max(1, Number(body.mainImageCount ?? 3)));
+  const detailImageCount = Math.min(6, Math.max(1, Number(body.detailImageCount ?? 3)));
 
   return streamSSE(c, async (stream) => {
     const emit = async (event: Record<string, unknown>) => {
       await stream.writeSSE({ data: JSON.stringify(event), event: "message" });
     };
+    let streamJobId: string | null = null;
 
     try {
       // ── 1. Load task ──────────────────────────────────────────────────
@@ -521,10 +604,7 @@ tasksRouter.get("/:taskId/generate-directions-stream", (c) => {
         .set({ currentStep: 2, updatedAt: new Date() })
         .where(eq(generationTasks.id, taskId));
 
-      // ── 2. Delete any stale directions for this task ───────────────────
-      await db.delete(designDirections).where(eq(designDirections.generationTaskId, taskId));
-
-      // ── 3. Analyse product images ─────────────────────────────────────
+      // ── 2. Analyse product images ─────────────────────────────────────
       const { productAssets, productSpecifications, sellingPoints,
               analysisVersions: analysisVersionsTable, synthesisReports,
               imageAnalysisCards } = await import("../db/schema.js");
@@ -622,9 +702,41 @@ tasksRouter.get("/:taskId/generate-directions-stream", (c) => {
         ? `\n\n【用户创意方向参考】\n${userIdeas.trim()}\n（请充分参考用户想法，但仍需生成${planCount}个差异化方向）`
         : "";
 
-      const prompt = `请为以下商品设计${planCount}个差异化的视觉方向，用于生成${outputTypeLabel}图片。\n${planCount}个方向之间需有明显差异，例如：极简高端、温暖生活场景、数据驱动专业风。\n\n【商品信息】\n${productCtx}\n\n【商品图片视觉分析】\n${productImageCtx}\n\n【竞品分析洞察】\n${synthesisContent || "暂无竞品分析数据，请基于商品特性自行判断"}${userIdeasSection}\n\n${assetIdNote}\n\n输出格式（严格JSON，只包含directions数组）：\n{\n  "directions": [\n    {\n      "label": "方向A — 简短主题名（6字以内）",\n      "positioning": "核心定位和目标受众（2-3句话）",\n      "colorScheme": "完整配色方案（主色+辅色+点缀色）",\n      "layoutIntent": "版式和构图策略",\n      "copyStrategy": "文案风格和主要卖点侧重",\n      "imageList": [\n        {\n          "listType": "main_image",\n          "productAssetId": "使用哪张商品图片的ID",\n          "title": "图片标题（8字以内）",\n          "description": "图片核心内容（30字以内）",\n          "sellingPoints": ["卖点1", "卖点2", "卖点3"],\n          "suggestedCopy": "建议主标题文案（10-15字）",\n          "compositionIntent": "详细构图描述",\n          "lighting": "完整光照方案",\n          "angle": "精确拍摄视角",\n          "background": "背景详细描述",\n          "mood": "视觉情绪描述（3-6个形容词）",\n          "visualElements": "画面中所有视觉元素清单"\n        }\n      ]\n    }\n  ]\n}\n\n要求：每个方向生成${imagesPerDirection}；只输出JSON`;
+      const legacyPrompt = `请为以下商品设计${planCount}个差异化的视觉方向，用于生成${outputTypeLabel}图片。\n${productCtx}\n${productImageCtx}\n${synthesisContent}\n${userIdeasSection}\n${assetIdNote}\n每个方向生成${imagesPerDirection}`;
 
       const SYSTEM_PROMPT = `你是一位顶级的电商视觉创意总监，擅长将商品特性与竞品洞察转化为可落地执行的视觉方案。请基于提供的商品信息和竞品分析，生成${planCount}个差异化设计方向，以严格的JSON格式输出，不包含任何其他内容。每个方向的图片列表需要包含非常丰富的视觉细节，以便直接驱动AI图片生成。`;
+
+      const renderedPrompt = await renderDesignPlanPromptSnapshot({
+        taskId,
+        ...(body.templateId !== undefined ? { templateId: body.templateId } : {}),
+        ...(body.editablePrompt !== undefined ? { editablePrompt: body.editablePrompt } : {}),
+        options: { userIdeas, planCount, mainImageCount, detailImageCount },
+      });
+      const prompt = renderedPrompt.finalPrompt || legacyPrompt;
+      await db.update(generationTasks).set({
+        planDefaultTemplateId: renderedPrompt.templateId,
+        latestPlanPromptSnapshot: prompt,
+        updatedAt: new Date(),
+      }).where(eq(generationTasks.id, taskId));
+      streamJobId = randomUUID();
+      await db.insert(backgroundJobs).values({
+        id: streamJobId,
+        type: "design_plan",
+        status: "running",
+        entityType: "generation_task",
+        entityId: taskId,
+        inputSnapshot: JSON.stringify({
+          taskId,
+          finalPrompt: prompt,
+          promptTemplateId: renderedPrompt.templateId,
+          userIdeas,
+          planCount,
+          mainImageCount,
+          detailImageCount,
+        }),
+        startedAt: new Date(),
+        createdAt: new Date(),
+      });
 
       // ── 5. Stream LLM output ──────────────────────────────────────────
       await emit({ type: "step", text: "正在生成设计方向，AI 思考中…" });
@@ -634,7 +746,7 @@ tasksRouter.get("/:taskId/generate-directions-stream", (c) => {
         scene: "design_plan",
         prompt,
         systemPrompt: SYSTEM_PROMPT,
-      })) {
+      }, streamJobId)) {
         if (chunk.text) {
           fullText += chunk.text;
           await emit({ type: "token", text: chunk.text });
@@ -653,6 +765,20 @@ tasksRouter.get("/:taskId/generate-directions-stream", (c) => {
         };
         if (Array.isArray(parsed.directions)) {
           const now = new Date();
+          const confirmedPlans = await db.select({ directionId: designPlanVersions.selectedDirectionId })
+            .from(designPlanVersions)
+            .where(and(
+              eq(designPlanVersions.generationTaskId, taskId),
+              isNotNull(designPlanVersions.confirmedAt),
+            ));
+          const protectedIds = new Set(confirmedPlans.map((plan) => plan.directionId));
+          const staleDirections = await db.select({ id: designDirections.id }).from(designDirections)
+            .where(eq(designDirections.generationTaskId, taskId));
+          for (const stale of staleDirections) {
+            if (!protectedIds.has(stale.id)) {
+              await db.delete(designDirections).where(eq(designDirections.id, stale.id));
+            }
+          }
           for (const dir of parsed.directions.slice(0, planCount)) {
             await db.insert(designDirections).values({
               id: randomUUID(),
@@ -666,20 +792,35 @@ tasksRouter.get("/:taskId/generate-directions-stream", (c) => {
             label: d.label ?? "未命名方向",
             content: JSON.stringify(d),
           }));
+          await db.update(generationTasks).set({ draftSelectedDirectionId: null, updatedAt: now })
+            .where(eq(generationTasks.id, taskId));
         }
       } catch {
+        if (streamJobId) await db.update(backgroundJobs).set({
+          status: "failed", errorType: "invalid_response",
+          errorMessage: "设计方向解析失败，模型返回格式错误", finishedAt: new Date(),
+        }).where(eq(backgroundJobs.id, streamJobId));
         await emit({ type: "error", message: "设计方向解析失败，模型返回格式错误，请重试" });
         return;
       }
 
       if (directions.length === 0) {
+        if (streamJobId) await db.update(backgroundJobs).set({
+          status: "failed", errorType: "invalid_response",
+          errorMessage: "未能解析到方向数据", finishedAt: new Date(),
+        }).where(eq(backgroundJobs.id, streamJobId));
         await emit({ type: "error", message: "设计方向生成失败，未能解析到方向数据，请重试" });
         return;
       }
 
+      if (streamJobId) await db.update(backgroundJobs).set({ status: "succeeded", finishedAt: new Date() })
+        .where(eq(backgroundJobs.id, streamJobId));
       await emit({ type: "done" });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (streamJobId) await db.update(backgroundJobs).set({
+        status: "failed", errorType: "unknown", errorMessage: message, finishedAt: new Date(),
+      }).where(eq(backgroundJobs.id, streamJobId));
       await stream.writeSSE({ data: JSON.stringify({ type: "error", message }), event: "message" });
     }
   });
@@ -722,10 +863,99 @@ tasksRouter.patch("/:taskId/direction", async (c) => {
   // We store the selection in a transient field — real commit happens in /plan
   await db
     .update(generationTasks)
-    .set({ currentStep: 3, updatedAt: new Date() })
+    .set({ currentStep: 3, draftSelectedDirectionId: body.directionId, updatedAt: new Date() })
     .where(eq(generationTasks.id, taskId));
 
   return c.json({ ok: true });
+});
+
+async function directionIsConfirmed(directionId: string): Promise<boolean> {
+  const [confirmed] = await db.select({ id: designPlanVersions.id })
+    .from(designPlanVersions)
+    .where(and(
+      eq(designPlanVersions.selectedDirectionId, directionId),
+      isNotNull(designPlanVersions.confirmedAt),
+    ))
+    .limit(1);
+  return Boolean(confirmed);
+}
+
+function parseDirectionProposal(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const proposal = value as Record<string, unknown>;
+  const requiredDirectionFields = [
+    "label", "positioning", "colorScheme", "layoutIntent", "copyStrategy",
+  ];
+  if (!requiredDirectionFields.every((field) => typeof proposal[field] === "string")) return null;
+  if (!Array.isArray(proposal["imageList"]) || proposal["imageList"].length === 0) return null;
+
+  const requiredImageStringFields = [
+    "title", "description", "suggestedCopy", "compositionIntent", "lighting",
+    "angle", "background", "mood", "visualElements",
+  ];
+  for (const rawItem of proposal["imageList"]) {
+    if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) return null;
+    const item = rawItem as Record<string, unknown>;
+    if (item["listType"] !== "main_image" && item["listType"] !== "detail_page") return null;
+    if (!requiredImageStringFields.every((field) => typeof item[field] === "string")) return null;
+    if (!Array.isArray(item["sellingPoints"]) || !item["sellingPoints"].every((point) => typeof point === "string")) return null;
+    if (!("productAssetId" in item) || (item["productAssetId"] !== null && typeof item["productAssetId"] !== "string")) return null;
+  }
+  return proposal;
+}
+
+// POST /api/tasks/directions/:directionId/polish — return a proposal only.
+tasksRouter.post("/directions/:directionId/polish", async (c) => {
+  const directionId = c.req.param("directionId");
+  const [direction] = await db.select().from(designDirections)
+    .where(eq(designDirections.id, directionId));
+  if (!direction) return c.json({ error: "方向不存在" }, 404);
+  if (await directionIsConfirmed(directionId)) {
+    return c.json({ error: "该方向已被确认方案引用，不能修改" }, 409);
+  }
+  const body = await c.req.json<{ instruction: string }>();
+  let instruction: string;
+  try {
+    instruction = validatePolishInstruction(body.instruction ?? "");
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+  if (!instruction) return c.json({ error: "请输入润色意见" }, 400);
+  try {
+    const { gatewayCall } = await import("../gateway/index.js");
+    const response = await gatewayCall("design_plan", {
+      scene: "design_plan",
+      systemPrompt: "你是电商视觉方案编辑。按用户意见修改方向，返回更新后的完整严格 JSON，不要输出 Markdown 或解释。必须保留 label、positioning、colorScheme、layoutIntent、copyStrategy、imageList 以及 imageList 内的全部字段。",
+      prompt: `【当前方向】\n${direction.content}\n\n【修改意见】\n${instruction}`,
+    });
+    const match = response.text?.match(/\{[\s\S]*\}/);
+    const proposal = parseDirectionProposal(JSON.parse(match?.[0] ?? response.text ?? ""));
+    if (!proposal) return c.json({ error: "模型返回的方向结构不完整" }, 502);
+    return c.json({ proposal });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+  }
+});
+
+// PATCH /api/tasks/directions/:directionId — confirm and persist a proposal.
+tasksRouter.patch("/directions/:directionId", async (c) => {
+  const directionId = c.req.param("directionId");
+  const [direction] = await db.select().from(designDirections)
+    .where(eq(designDirections.id, directionId));
+  if (!direction) return c.json({ error: "方向不存在" }, 404);
+  if (await directionIsConfirmed(directionId)) {
+    return c.json({ error: "该方向已被确认方案引用，不能修改" }, 409);
+  }
+  const body = await c.req.json<{ proposal: unknown }>();
+  const proposal = parseDirectionProposal(body.proposal);
+  if (!proposal) return c.json({ error: "方向提案结构不完整" }, 400);
+  await db.update(designDirections).set({
+    label: String(proposal["label"]),
+    content: JSON.stringify(proposal),
+  }).where(eq(designDirections.id, directionId));
+  const [updated] = await db.select().from(designDirections)
+    .where(eq(designDirections.id, directionId));
+  return c.json(updated);
 });
 
 // POST /api/tasks/directions/:directionId/chat — chat with a design direction to refine it
@@ -782,11 +1012,6 @@ tasksRouter.post("/directions/:directionId/chat", async (c) => {
       const parsed = JSON.parse(jsonMatch[1]!) as Record<string, unknown>;
       if (parsed["label"] || parsed["positioning"] || parsed["imageList"]) {
         updatedContent = parsed;
-        // Persist updated content to DB
-        await db
-          .update(designDirections)
-          .set({ content: JSON.stringify(updatedContent) })
-          .where(eq(designDirections.id, directionId));
       }
     } catch { /* ignore parse errors */ }
   }
@@ -802,6 +1027,7 @@ tasksRouter.post("/:taskId/plan", async (c) => {
 
   const body = await c.req.json<{
     directionId: string;
+    imageTemplateId?: string | null;
     items: Array<{
       listType: "main_image" | "detail_page";
       title: string;
@@ -816,8 +1042,22 @@ tasksRouter.post("/:taskId/plan", async (c) => {
       visualElements?: string;
       productAssetId?: string | null;
       presetId: string;
+      promptTemplateId?: string | null;
     }>;
   }>();
+
+  const [selectedDirection] = await db.select().from(designDirections)
+    .where(eq(designDirections.id, body.directionId));
+  if (!selectedDirection || selectedDirection.generationTaskId !== taskId) {
+    return c.json({ error: "所选方向不存在或不属于当前任务" }, 400);
+  }
+  if (body.imageTemplateId) {
+    const [template] = await db.select().from(promptTemplates)
+      .where(eq(promptTemplates.id, body.imageTemplateId));
+    if (!template || template.type !== "image_generation" || template.archivedAt) {
+      return c.json({ error: "图片默认模板无效" }, 400);
+    }
+  }
 
   const now = new Date();
 
@@ -862,6 +1102,7 @@ tasksRouter.post("/:taskId/plan", async (c) => {
       visualElements: item.visualElements ?? null,
       productAssetId: item.productAssetId ?? null,
       referenceAssetIds: null,
+      promptTemplateId: item.promptTemplateId ?? null,
       outputPresetSnapshot: presetSnapshot,
       createdAt: now,
       updatedAt: now,
@@ -870,7 +1111,12 @@ tasksRouter.post("/:taskId/plan", async (c) => {
 
   await db
     .update(generationTasks)
-    .set({ currentStep: 4, updatedAt: now })
+    .set({
+      currentStep: 4,
+      draftSelectedDirectionId: body.directionId,
+      ...(body.imageTemplateId !== undefined ? { imageDefaultTemplateId: body.imageTemplateId } : {}),
+      updatedAt: now,
+    })
     .where(eq(generationTasks.id, taskId));
 
   const items = await db
@@ -895,13 +1141,47 @@ tasksRouter.post("/:taskId/generate", async (c) => {
 
   if (items.length === 0) return c.json({ error: "No items in plan" }, 422);
 
+  const active = await db.select({ entityId: backgroundJobs.entityId }).from(backgroundJobs).where(and(
+    eq(backgroundJobs.entityType, "image_item"),
+    inArray(backgroundJobs.entityId, items.map((item) => item.id)),
+    inArray(backgroundJobs.status, ["queued", "running"]),
+  ));
+  if (active.length > 0) return c.json({ error: "部分图片已有正在进行的生成任务" }, 409);
+
+  // Render every prompt before enqueueing anything. Promise rejection leaves the
+  // batch untouched, which prevents partially queued batches.
+  let frozen: Array<Awaited<ReturnType<typeof renderImageGenerationPromptSnapshot>>>;
+  try {
+    frozen = await Promise.all(items.map((item) =>
+      renderImageGenerationPromptSnapshot({ imageItemId: item.id })
+    ));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 422);
+  }
+
+  const existingVersions = await db.select({ itemId: imageVersions.imageItemId })
+    .from(imageVersions)
+    .where(inArray(imageVersions.imageItemId, items.map((item) => item.id)));
+  const itemsWithVersions = new Set(existingVersions.map((version) => version.itemId));
+
   const jobIds: string[] = [];
-  for (const item of items) {
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]!;
+    const snapshot = frozen[index]!;
     const jobId = await enqueueJob({
       type: "image_generation",
       entityType: "image_item",
       entityId: item.id,
-      inputSnapshot: { imageItemId: item.id, planVersionId: body.planVersionId },
+      inputSnapshot: {
+        imageItemId: item.id,
+        planVersionId: body.planVersionId,
+        finalPrompt: snapshot.finalPrompt,
+        promptTemplateId: snapshot.templateId,
+        polishInstruction: null,
+        width: snapshot.width,
+        height: snapshot.height,
+        generationType: itemsWithVersions.has(item.id) ? "regeneration" : "initial",
+      },
     });
     jobIds.push(jobId);
   }

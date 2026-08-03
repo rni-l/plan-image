@@ -22,7 +22,7 @@ export interface ImageEditInput {
  * The wrapper clarifies scope (masked region only), quality expectations, and
  * consistency constraints so the model avoids unintended global changes.
  */
-function buildEditPrompt(instruction: string): string {
+export function buildEditPrompt(instruction: string): string {
   return `请对图片中遮罩标注的区域进行如下修改：${instruction}
 
 编辑要求：
@@ -143,6 +143,7 @@ export async function handleImageEdit(
       filePath: saved.relativePath,
       checksum: saved.checksum,
       jobId,
+      finalPrompt: buildEditPrompt(input.instruction),
       isSelected: true,
     })
     .where(eq(imageVersions.id, input.versionId));

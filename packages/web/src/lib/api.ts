@@ -22,6 +22,47 @@ async function request<T>(path: string, opts: FetchOpts = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export async function postSSE<T>(
+  path: string,
+  body: unknown,
+  onEvent: (event: T) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => response.statusText);
+    throw new ApiError(response.status, text);
+  }
+  if (!response.body) throw new ApiError(502, "流式响应缺少 body");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const emitBlock = (block: string) => {
+    const data = block.split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    if (!data || data === "[DONE]") return;
+    onEvent(JSON.parse(data) as T);
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const blocks = buffer.split(/\r?\n\r?\n/);
+    buffer = blocks.pop() ?? "";
+    for (const block of blocks) emitBlock(block);
+    if (done) break;
+  }
+  if (buffer.trim()) emitBlock(buffer);
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -39,6 +80,7 @@ export const api = {
   put: <T>(path: string, body: unknown) => request<T>(path, { method: "PUT", body }),
   patch: <T>(path: string, body: unknown) => request<T>(path, { method: "PATCH", body }),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  postSSE,
 
   /** Upload a single file as multipart/form-data with field name "file". */
   upload: async <T>(path: string, file: File): Promise<T> => {

@@ -5,6 +5,14 @@ ALTER TABLE `model_call_logs` ADD `completion_tokens` integer;
 --> statement-breakpoint
 ALTER TABLE `model_call_logs` ADD `total_tokens` integer;
 --> statement-breakpoint
+ALTER TABLE `model_call_logs` ADD `error_message` text;
+--> statement-breakpoint
+ALTER TABLE `model_call_logs` ADD `request_prompt` text;
+--> statement-breakpoint
+ALTER TABLE `model_call_logs` ADD `request_params` text;
+--> statement-breakpoint
+ALTER TABLE `model_call_logs` ADD `response_body` text;
+--> statement-breakpoint
 
 -- HTTP API request log
 CREATE TABLE `api_request_logs` (

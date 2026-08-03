@@ -14,6 +14,7 @@ import { eq } from "drizzle-orm";
 import { gatewayCall } from "../../gateway/index.js";
 import { randomUUID } from "node:crypto";
 import { analyseAndPersistAsset } from "../../lib/product-analysis.js";
+import { renderDesignPlanPromptSnapshot } from "../../lib/prompt-service.js";
 
 export interface DesignPlanInput {
   taskId: string;
@@ -187,7 +188,7 @@ export async function handleDesignPlan(
     ? `可用的商品图片ID列表：${validAssetIds.join("、")}。每张图必须从这个列表中选择一个productAssetId。`
     : "暂无商品图片，productAssetId填null。";
 
-  const prompt = `请为以下商品设计3个差异化的视觉方向，用于生成${outputTypeLabel}图片。
+  const legacyPrompt = `请为以下商品设计3个差异化的视觉方向，用于生成${outputTypeLabel}图片。
 3个方向之间需有明显差异，例如：极简高端、温暖生活场景、数据驱动专业风。
 
 【商品信息】
@@ -237,7 +238,14 @@ ${assetIdNote}
 - 不同图片尽量使用不同的构图、拍摄角度和场景，体现多样性
 - 只输出JSON`;
 
-  const response = await gatewayCall("design_plan", { scene: "design_plan", prompt, systemPrompt: SYSTEM_PROMPT });
+  const renderedPrompt = await renderDesignPlanPromptSnapshot({ taskId: input.taskId });
+  const prompt = renderedPrompt.finalPrompt || legacyPrompt;
+  await db.update(generationTasks).set({
+    planDefaultTemplateId: renderedPrompt.templateId,
+    latestPlanPromptSnapshot: prompt,
+    updatedAt: new Date(),
+  }).where(eq(generationTasks.id, input.taskId));
+  const response = await gatewayCall("design_plan", { scene: "design_plan", prompt, systemPrompt: SYSTEM_PROMPT }, _jobId);
 
   // Parse directions from model output
   const text = response.text ?? "";

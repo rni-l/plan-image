@@ -16,6 +16,7 @@ ALTER TABLE `image_items` ADD `visual_elements` text;
 
 -- Which product photo to use as reference image for this image item
 ALTER TABLE `image_items` ADD `product_asset_id` text;
+--> statement-breakpoint
 
 -- Also add missing columns to api_request_logs that schema defines but 0001 missed
 ALTER TABLE `api_request_logs` ADD `query_string` text;

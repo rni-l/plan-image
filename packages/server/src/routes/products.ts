@@ -9,7 +9,7 @@ import {
   sellingPoints,
   competitorAssets,
 } from "../db/schema.js";
-import { eq, isNull, desc } from "drizzle-orm";
+import { and, eq, isNull, desc } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { saveImageAsset, UploadError } from "../lib/storage.js";
@@ -355,14 +355,18 @@ productsRouter.post("/:id/tasks", async (c) => {
     description?: string;
   }>();
 
-  const { generationTasks, modelSceneRoutes, modelProviders, outputPresets } =
+  const { generationTasks, modelSceneRoutes, modelProviders, outputPresets, promptTemplates } =
     await import("../db/schema.js");
 
   // Freeze current model routing + presets as config snapshot
-  const [routes, providers, presets] = await Promise.all([
+  const [routes, providers, presets, defaults] = await Promise.all([
     db.select().from(modelSceneRoutes),
     db.select().from(modelProviders),
     db.select().from(outputPresets),
+    db.select().from(promptTemplates).where(and(
+      eq(promptTemplates.isDefault, true),
+      isNull(promptTemplates.archivedAt),
+    )),
   ]);
   const configSnapshot = JSON.stringify({ routes, providers: providers.map(p => ({ ...p, keyHint: p.keyHint })), presets });
 
@@ -377,6 +381,8 @@ productsRouter.post("/:id/tasks", async (c) => {
     name: body.name ?? null,
     description: body.description ?? null,
     configSnapshot,
+    planDefaultTemplateId: defaults.find((template) => template.type === "design_plan")?.id ?? null,
+    imageDefaultTemplateId: defaults.find((template) => template.type === "image_generation")?.id ?? null,
     currentStep: 1,
     createdAt: now,
     updatedAt: now,
@@ -450,4 +456,3 @@ productsRouter.post("/:id/extract-info", zValidator("json", extractInfoSchema), 
     return c.json({ error: "解析模型响应失败，请重试" }, 502);
   }
 });
-

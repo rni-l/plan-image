@@ -4,6 +4,7 @@ import {
   Loader2, ChevronRight, Check, Plus, X, GripVertical,
   RefreshCw, ZoomIn, AlertCircle, Zap, Pencil, Download, Rows2,
   MessageSquare, Send, Clock, ChevronDown, Info,
+  FileText, Sparkles, Copy,
 } from "lucide-react";
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors,
@@ -15,6 +16,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { shouldGenerateDirections } from "@/lib/task-wizard-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -36,6 +38,10 @@ interface GenerationTask {
   analysisVersionId: string;
   outputTypes: string;        // JSON array
   currentStep: number;
+  planDefaultTemplateId: string | null;
+  imageDefaultTemplateId: string | null;
+  latestPlanPromptSnapshot: string | null;
+  draftSelectedDirectionId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -63,6 +69,14 @@ interface DraftItem {
   sellingPoints?: string[];
   suggestedCopy?: string;
   compositionIntent?: string;
+  lighting?: string;
+  angle?: string;
+  background?: string;
+  mood?: string;
+  visualElements?: string;
+  productAssetId?: string | null;
+  referenceAssetIds?: string;
+  promptTemplateId?: string | null;
   presetId?: string;
   outputPresetSnapshot?: string;
 }
@@ -79,6 +93,11 @@ interface ImageVersion {
   filePath: string;
   checksum: string;
   generationType: string;
+  parentVersionId: string | null;
+  instruction: string | null;
+  promptTemplateId: string | null;
+  finalPrompt: string | null;
+  polishInstruction: string | null;
   isSelected: boolean;
   createdAt: number;
 }
@@ -107,6 +126,28 @@ interface Step1Config {
   planCount: number;
   mainImageCount: number;
   detailImageCount: number;
+  planTemplateId: string | null;
+  planEditablePrompt?: string;
+  generateRequested: boolean;
+}
+
+interface PromptTemplate {
+  id: string;
+  type: "design_plan" | "image_generation";
+  name: string;
+  description: string | null;
+  body: string;
+  isBuiltIn: boolean;
+  isDefault: boolean;
+}
+
+interface PromptRender {
+  templateId: string | null;
+  templateName: string | null;
+  editablePrompt: string;
+  lockedSuffix: string;
+  finalPrompt: string;
+  contextVariables: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,10 +187,11 @@ function DirectionChatSheet({
   const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [proposal, setProposal] = useState<Record<string, unknown> | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Reset messages when direction changes
-  useEffect(() => { setMessages([]); setInput(""); }, [direction.id]);
+  useEffect(() => { setMessages([]); setInput(""); setProposal(null); }, [direction.id]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -163,18 +205,30 @@ function DirectionChatSheet({
     setInput("");
     setSending(true);
     try {
-      const res = await api.post<{ reply: string; updatedContent: Record<string, unknown> | null }>(
-        `/tasks/directions/${direction.id}/chat`,
-        { message: text, history: messages }
+      const res = await api.post<{ proposal: Record<string, unknown> }>(
+        `/tasks/directions/${direction.id}/polish`,
+        { instruction: text }
       );
-      setMessages(prev => [...prev, { role: "assistant", content: res.reply }]);
-      if (res.updatedContent) {
-        onUpdated(direction.id, JSON.stringify(res.updatedContent));
-        toast.success("方向内容已更新");
-      }
+      setProposal(res.proposal);
+      setMessages(prev => [...prev, { role: "assistant", content: "已生成完整修改提案。确认结构和图片清单后再应用。" }]);
     } catch {
       toast.error("发送失败，请重试");
       setMessages(prev => prev.slice(0, -1)); // remove optimistic user msg
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function applyProposal() {
+    if (!proposal) return;
+    setSending(true);
+    try {
+      const updated = await api.patch<DesignDirection>(`/tasks/directions/${direction.id}`, { proposal });
+      onUpdated(direction.id, updated.content);
+      setProposal(null);
+      toast.success("方向提案已应用");
+    } catch {
+      toast.error("该方向可能已被确认方案引用，无法修改");
     } finally {
       setSending(false);
     }
@@ -216,6 +270,18 @@ function DirectionChatSheet({
               </div>
             </div>
           )}
+          {proposal && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+              <p className="mb-2 text-xs font-medium text-amber-900">待确认的完整结构化提案</p>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap text-[11px] leading-relaxed text-amber-950">
+                {JSON.stringify(proposal, null, 2)}
+              </pre>
+              <div className="mt-3 flex justify-end gap-2">
+                <Button size="sm" variant="outline" onClick={() => setProposal(null)}>取消</Button>
+                <Button size="sm" onClick={applyProposal} disabled={sending}>确认应用</Button>
+              </div>
+            </div>
+          )}
           <div ref={bottomRef} />
         </div>
 
@@ -249,10 +315,12 @@ function DirectionChatSheet({
 function Step2({
   task,
   config,
+  onGenerationRequestConsumed,
   onNext,
 }: {
   task: GenerationTask;
   config: Step1Config;
+  onGenerationRequestConsumed: () => void;
   onNext: () => void;
 }) {
   const [directions, setDirections] = useState<DesignDirection[]>([]);
@@ -261,7 +329,7 @@ function Step2({
   const [tokenBuffer, setTokenBuffer] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const sourceRef = useRef<EventSource | null>(null);
+  const sourceRef = useRef<AbortController | null>(null);
   const tokenEndRef = useRef<HTMLDivElement | null>(null);
 
   // Elapsed timer
@@ -281,7 +349,7 @@ function Step2({
   }, []);
 
   const startStream = useCallback(() => {
-    sourceRef.current?.close();
+    sourceRef.current?.abort();
     setStreamState(null);
     setSteps([]);
     setTokenBuffer("");
@@ -297,26 +365,24 @@ function Step2({
     const outputTypes: string[] = JSON.parse(task.outputTypes);
     const mainCount = outputTypes.includes("main_image") ? config.mainImageCount : 0;
     const detailCount = outputTypes.includes("detail_page") ? config.detailImageCount : 0;
-    const params = new URLSearchParams({
-      planCount: String(config.planCount),
-      ...(mainCount > 0 ? { mainImageCount: String(mainCount) } : {}),
-      ...(detailCount > 0 ? { detailImageCount: String(detailCount) } : {}),
-      ...(config.userIdeas.trim() ? { userIdeas: config.userIdeas.trim() } : {}),
-    });
-
-    const src = new EventSource(`/api/tasks/${task.id}/generate-directions-stream?${params.toString()}`);
-    sourceRef.current = src;
-
-    src.onmessage = (e: MessageEvent<string>) => {
-      let payload: { type: string; text?: string; message?: string };
-      try { payload = JSON.parse(e.data) as typeof payload; } catch { return; }
-
+    const controller = new AbortController();
+    sourceRef.current = controller;
+    void api.postSSE<{ type: string; text?: string; message?: string }>(
+      `/tasks/${task.id}/generate-directions-stream`,
+      {
+        planCount: config.planCount,
+        mainImageCount: mainCount,
+        detailImageCount: detailCount,
+        userIdeas: config.userIdeas.trim(),
+        templateId: config.planTemplateId,
+        ...(config.planEditablePrompt ? { editablePrompt: config.planEditablePrompt } : {}),
+      },
+      (payload) => {
       if (payload.type === "step" && payload.text) {
         setSteps((prev) => [...prev, payload.text!]);
       } else if (payload.type === "token" && payload.text) {
         setTokenBuffer((prev) => prev + payload.text);
       } else if (payload.type === "done") {
-        src.close();
         sourceRef.current = null;
         stopTimer();
         setElapsedMs(Date.now() - startTimeRef.current);
@@ -327,25 +393,51 @@ function Step2({
           })
           .catch(() => setStreamState("加载设计方向失败，请刷新重试"));
       } else if (payload.type === "error") {
-        src.close();
         sourceRef.current = null;
         stopTimer();
         setStreamState(payload.message ?? "生成失败，请重试");
       }
-    };
-
-    src.onerror = () => {
-      src.close();
+      },
+      controller.signal,
+    ).catch((error: unknown) => {
+      if (error instanceof DOMException && error.name === "AbortError") return;
       sourceRef.current = null;
       stopTimer();
-      setStreamState("连接中断，请点击重试");
-    };
-  }, [task.id, task.outputTypes, config, stopTimer]);
+      setStreamState(error instanceof Error ? error.message : "连接中断，请点击重试");
+    });
+  }, [
+    task.id,
+    task.outputTypes,
+    config.planCount,
+    config.mainImageCount,
+    config.detailImageCount,
+    config.userIdeas,
+    config.planTemplateId,
+    config.planEditablePrompt,
+    stopTimer,
+  ]);
 
   useEffect(() => {
-    startStream();
-    return () => { sourceRef.current?.close(); stopTimer(); };
-  }, [startStream, stopTimer]);
+    let cancelled = false;
+    const generateRequested = config.generateRequested;
+    api.get<{ directions: DesignDirection[]; draftSelectedDirectionId: string | null }>(`/tasks/${task.id}`)
+      .then((data) => {
+        if (cancelled) return;
+        if (!shouldGenerateDirections(generateRequested, data.directions.length)) {
+          setDirections(data.directions);
+          setSelectedId(data.draftSelectedDirectionId ?? data.directions[0]?.id ?? null);
+          setStreamState("done");
+        } else {
+          if (generateRequested) onGenerationRequestConsumed();
+          startStream();
+        }
+      })
+      .catch(() => {
+        if (generateRequested) onGenerationRequestConsumed();
+        startStream();
+      });
+    return () => { cancelled = true; sourceRef.current?.abort(); stopTimer(); };
+  }, [task.id, startStream, stopTimer]);
 
   async function handleNext() {
     if (!selectedId) return;
@@ -538,6 +630,8 @@ function Step3({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
   const [presets, setPresets] = useState<OutputPreset[]>([]);
   const [loadingDir, setLoadingDir] = useState(true);
   const [selectedDirId, setSelectedDirId] = useState<string | null>(null);
+  const [imageTemplates, setImageTemplates] = useState<PromptTemplate[]>([]);
+  const [imageTemplateId, setImageTemplateId] = useState<string | null>(task.imageDefaultTemplateId);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -545,15 +639,18 @@ function Step3({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
 
   useEffect(() => {
     Promise.all([
-      api.get<{ directions: Array<{ id: string; label: string; content: string }> }>(`/tasks/${task.id}`),
+      api.get<{ directions: Array<{ id: string; label: string; content: string }>; draftSelectedDirectionId: string | null }>(`/tasks/${task.id}`),
       api.get<OutputPreset[]>("/settings/presets"),
-    ]).then(([taskData, ps]) => {
+      api.get<PromptTemplate[]>("/settings/prompt-templates?type=image_generation"),
+    ]).then(([taskData, ps, templateRows]) => {
       setPresets(ps);
+      setImageTemplates(templateRows);
+      setImageTemplateId(task.imageDefaultTemplateId ?? templateRows.find((row) => row.isDefault)?.id ?? null);
       const dirs = taskData.directions;
       if (dirs.length > 0) {
-        const lastDir = dirs[dirs.length - 1]!;
-        setSelectedDirId(lastDir.id);
-        const content = parseDirection(lastDir.content);
+        const selectedDir = dirs.find((dir) => dir.id === taskData.draftSelectedDirectionId) ?? dirs[0]!;
+        setSelectedDirId(selectedDir.id);
+        const content = parseDirection(selectedDir.content);
         if (content.imageList && content.imageList.length > 0) {
           const defaultPreset = ps.find(p => p.presetType === "main_image") ?? ps[0];
           setItems(content.imageList.map((il) => ({
@@ -601,6 +698,7 @@ function Step3({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
         `/tasks/${task.id}/plan`,
         {
           directionId: selectedDirId,
+          imageTemplateId,
           items: items.map((it) => ({
             listType: it.listType,
             title: it.title,
@@ -608,6 +706,13 @@ function Step3({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
             sellingPoints: it.sellingPoints?.filter(Boolean),
             suggestedCopy: it.suggestedCopy || undefined,
             compositionIntent: it.compositionIntent || undefined,
+            lighting: it.lighting || undefined,
+            angle: it.angle || undefined,
+            background: it.background || undefined,
+            mood: it.mood || undefined,
+            visualElements: it.visualElements || undefined,
+            productAssetId: it.productAssetId ?? undefined,
+            promptTemplateId: it.promptTemplateId ?? null,
             presetId: it.presetId || presets[0]?.id || "",
           })),
         }
@@ -639,6 +744,14 @@ function Step3({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
       <div className="mb-5 flex items-center justify-between">
         <h2 className="text-sm font-medium text-zinc-900">编辑图片清单（{items.length} 张）</h2>
         <div className="flex gap-2">
+          <select
+            className="h-8 rounded-md border border-zinc-200 bg-white px-2 text-xs"
+            value={imageTemplateId ?? ""}
+            onChange={(e) => setImageTemplateId(e.target.value || null)}
+            title="所有图片默认继承此模板"
+          >
+            {imageTemplates.map((template) => <option key={template.id} value={template.id}>默认：{template.name}</option>)}
+          </select>
           <Button size="sm" variant="outline" onClick={() => addItem("main_image")}>
             <Plus size={13} /> 主图
           </Button>
@@ -661,6 +774,7 @@ function Step3({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
                 item={item}
                 index={index}
                 presets={presets}
+                promptTemplates={imageTemplates}
                 onChange={(patch) => updateItem(index, patch)}
                 onRemove={() => removeItem(index)}
               />
@@ -720,7 +834,7 @@ function Step4({ task }: { task: GenerationTask }) {
   // Streaming state
   const [streamPreviews, setStreamPreviews] = useState<Record<string, string>>({});
   const [streamingIds, setStreamingIds] = useState<Set<string>>(new Set());
-  const streamSourcesRef = useRef<Record<string, EventSource>>({});
+  const streamSourcesRef = useRef<Record<string, AbortController>>({});
 
   // Per-image generation timers
   const [streamStartTimes, setStreamStartTimes] = useState<Record<string, number>>({});
@@ -730,6 +844,14 @@ function Step4({ task }: { task: GenerationTask }) {
 
   // Per-image params expand state
   const [expandedParams, setExpandedParams] = useState<Set<string>>(new Set());
+  const [imageTemplates, setImageTemplates] = useState<PromptTemplate[]>([]);
+  const [promptTarget, setPromptTarget] = useState<{ item: ImageItem; version?: ImageVersion; regenerate: boolean } | null>(null);
+  const [promptRender, setPromptRender] = useState<PromptRender | null>(null);
+  const [promptDraft, setPromptDraft] = useState("");
+  const [promptTemplateId, setPromptTemplateId] = useState<string | null>(null);
+  const [promptInstruction, setPromptInstruction] = useState("");
+  const [promptProposal, setPromptProposal] = useState<string | null>(null);
+  const [promptBusy, setPromptBusy] = useState(false);
 
   // Tick all active streaming timers
   useEffect(() => {
@@ -761,6 +883,12 @@ function Step4({ task }: { task: GenerationTask }) {
       })
       .catch(() => toast.error("加载方案数据失败"));
   }, [task.id]);
+
+  useEffect(() => {
+    api.get<PromptTemplate[]>("/settings/prompt-templates?type=image_generation")
+      .then(setImageTemplates)
+      .catch(() => toast.error("加载图片 Prompt 模板失败"));
+  }, []);
 
   useEffect(() => {
     if (!planVersionId) return;
@@ -806,7 +934,7 @@ function Step4({ task }: { task: GenerationTask }) {
 
   useEffect(() => () => {
     stopPolling();
-    Object.values(streamSourcesRef.current).forEach((s) => s.close());
+    Object.values(streamSourcesRef.current).forEach((s) => s.abort());
   }, []);
 
   async function handleGenerate() {
@@ -840,9 +968,13 @@ function Step4({ task }: { task: GenerationTask }) {
     if (!pollRef.current) pollRef.current = setInterval(() => pollJobs(items), 3500);
   }
 
-  function startStream(itemId: string) {
+  function startStream(itemId: string, options: {
+    templateId?: string | null;
+    editablePrompt?: string;
+    polishInstruction?: string | null;
+  } = {}) {
     if (streamSourcesRef.current[itemId]) {
-      streamSourcesRef.current[itemId]!.close();
+      streamSourcesRef.current[itemId]!.abort();
       delete streamSourcesRef.current[itemId];
     }
 
@@ -852,21 +984,17 @@ function Step4({ task }: { task: GenerationTask }) {
     setStreamStartTimes((prev) => ({ ...prev, [itemId]: now }));
     setStreamElapsedMs((prev) => ({ ...prev, [itemId]: 0 }));
 
-    const source = new EventSource(`/api/tasks/items/${itemId}/generate-stream`);
-    streamSourcesRef.current[itemId] = source;
-
-    source.onmessage = (e: MessageEvent<string>) => {
-      const payload = JSON.parse(e.data) as {
+    const controller = new AbortController();
+    streamSourcesRef.current[itemId] = controller;
+    void api.postSSE<{
         type: "progress" | "done" | "error";
         b64?: string;
         versionId?: string;
         message?: string;
-      };
-
+      }>(`/tasks/items/${itemId}/generate-stream`, options, (payload) => {
       if (payload.type === "progress" && payload.b64) {
         setStreamPreviews((prev) => ({ ...prev, [itemId]: payload.b64! }));
       } else if (payload.type === "done") {
-        source.close();
         delete streamSourcesRef.current[itemId];
         const elapsed = Date.now() - (streamStartTimes[itemId] ?? Date.now());
         setStreamFinalMs(prev => ({ ...prev, [itemId]: elapsed }));
@@ -874,21 +1002,111 @@ function Step4({ task }: { task: GenerationTask }) {
         setStreamPreviews((prev) => { const next = { ...prev }; delete next[itemId]; return next; });
         loadVersions(items).catch(() => {});
       } else if (payload.type === "error") {
-        source.close();
         delete streamSourcesRef.current[itemId];
         setStreamingIds((prev) => { const next = new Set(prev); next.delete(itemId); return next; });
         setStreamPreviews((prev) => { const next = { ...prev }; delete next[itemId]; return next; });
         toast.error(payload.message ?? "生成失败");
       }
-    };
-
-    source.onerror = () => {
-      source.close();
+    }, controller.signal).catch((error: unknown) => {
+      if (error instanceof DOMException && error.name === "AbortError") return;
       delete streamSourcesRef.current[itemId];
       setStreamingIds((prev) => { const next = new Set(prev); next.delete(itemId); return next; });
       setStreamPreviews((prev) => { const next = { ...prev }; delete next[itemId]; return next; });
-      toast.error("连接中断，请重试");
-    };
+      toast.error(error instanceof Error ? error.message : "连接中断，请重试");
+    });
+  }
+
+  async function openPromptPanel(item: ImageItem, version: ImageVersion | undefined, regenerate: boolean) {
+    setPromptTarget({ item, ...(version ? { version } : {}), regenerate });
+    setPromptInstruction("");
+    setPromptProposal(null);
+    if (!regenerate) return;
+    setPromptBusy(true);
+    try {
+      const rendered = await api.post<PromptRender>("/prompts/render", {
+        type: "image_generation",
+        imageItemId: item.id,
+      });
+      setPromptRender(rendered);
+      setPromptDraft(rendered.editablePrompt);
+      setPromptTemplateId(rendered.templateId);
+    } catch {
+      toast.error("Prompt 渲染失败");
+      setPromptTarget(null);
+    } finally {
+      setPromptBusy(false);
+    }
+  }
+
+  async function switchPromptTemplate(templateId: string) {
+    if (!promptTarget) return;
+    setPromptTemplateId(templateId);
+    setPromptBusy(true);
+    try {
+      const rendered = await api.post<PromptRender>("/prompts/render", {
+        type: "image_generation",
+        imageItemId: promptTarget.item.id,
+        templateId,
+      });
+      setPromptRender(rendered);
+      setPromptDraft(rendered.editablePrompt);
+      setPromptProposal(null);
+    } catch {
+      toast.error("切换模板失败");
+    } finally {
+      setPromptBusy(false);
+    }
+  }
+
+  async function polishImagePrompt() {
+    if (!promptInstruction.trim()) return;
+    setPromptBusy(true);
+    try {
+      const result = await api.post<{ proposal: string }>("/prompts/polish", {
+        type: "image_generation",
+        editablePrompt: promptDraft,
+        instruction: promptInstruction,
+      });
+      setPromptProposal(result.proposal);
+    } catch {
+      toast.error("Prompt 润色失败");
+    } finally {
+      setPromptBusy(false);
+    }
+  }
+
+  function confirmRegeneration() {
+    if (!promptTarget) return;
+    startStream(promptTarget.item.id, {
+      templateId: promptTemplateId,
+      editablePrompt: promptProposal ?? promptDraft,
+      polishInstruction: promptProposal ? promptInstruction : null,
+    });
+    setPromptTarget(null);
+  }
+
+  async function savePromptAsTemplate() {
+    if (!promptRender) return;
+    const name = window.prompt("自定义模板名称");
+    if (!name?.trim()) return;
+    try {
+      const parameterized = await api.post<{ parameterizedBody: string }>("/prompts/parameterize", {
+        type: "image_generation",
+        text: promptProposal ?? promptDraft,
+        contextVariables: promptRender.contextVariables,
+      });
+      const created = await api.post<PromptTemplate>("/settings/prompt-templates", {
+        type: "image_generation",
+        name: name.trim(),
+        description: "从单图生成 Prompt 另存",
+        body: parameterized.parameterizedBody,
+      });
+      setImageTemplates((current) => [...current, created]);
+      setPromptTemplateId(created.id);
+      toast.success("已另存为自定义模板");
+    } catch {
+      toast.error("另存模板失败，请检查变量还原结果");
+    }
   }
 
   const anyGenerated = Object.values(versions).some(vs => vs.length > 0);
@@ -1020,11 +1238,18 @@ function Step4({ task }: { task: GenerationTask }) {
                       )}
                       <div className="absolute right-2 top-2 flex gap-1">
                         <button
-                          onClick={() => startStream(item.id)}
+                          onClick={() => openPromptPanel(item, selected, true)}
                           className="rounded bg-white/80 p-1 opacity-0 shadow-sm transition-opacity hover:bg-white group-hover:opacity-100"
                           title="重新生成"
                         >
                           <RefreshCw size={13} className="text-zinc-500" />
+                        </button>
+                        <button
+                          onClick={() => openPromptPanel(item, selected, false)}
+                          className="rounded bg-white/80 p-1 opacity-0 shadow-sm transition-opacity hover:bg-white group-hover:opacity-100"
+                          title="查看完整 Prompt"
+                        >
+                          <FileText size={13} className="text-zinc-500" />
                         </button>
                         <button
                           onClick={() => setInpaintTarget({ item, version: selected })}
@@ -1079,7 +1304,7 @@ function Step4({ task }: { task: GenerationTask }) {
                   <div className="flex shrink-0 items-center gap-1">
                     {isFailed && !isStreaming && (
                       <button
-                        onClick={() => startStream(item.id)}
+                        onClick={() => openPromptPanel(item, selected, true)}
                         className="flex items-center gap-1 rounded-md border border-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50"
                         title={job?.errorMessage ?? "重试"}
                       >
@@ -1172,6 +1397,81 @@ function Step4({ task }: { task: GenerationTask }) {
           onSubmitted={handleInpaintSubmitted}
         />
       )}
+      <Sheet
+        open={Boolean(promptTarget)}
+        onOpenChange={(open) => { if (!open) setPromptTarget(null); }}
+        title={promptTarget?.regenerate ? `重新生成：${promptTarget.item.title}` : `版本 Prompt：${promptTarget?.item.title ?? ""}`}
+        className="w-[640px]"
+      >
+        {promptTarget && (
+          <div className="flex h-full flex-col gap-4 p-5">
+            {promptTarget.regenerate ? (
+              <>
+                <div>
+                  <Label>本次模板</Label>
+                  <select className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm"
+                    value={promptTemplateId ?? ""} onChange={(e) => switchPromptTemplate(e.target.value)}>
+                    {imageTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+                  </select>
+                </div>
+                <div className="min-h-0 flex-1">
+                  <Label>可编辑正文</Label>
+                  <Textarea rows={15} className="mt-1 h-[320px] font-mono text-xs"
+                    value={promptProposal ?? promptDraft} onChange={(e) => {
+                      setPromptProposal(null);
+                      setPromptDraft(e.target.value);
+                    }} />
+                </div>
+                <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3">
+                  <p className="mb-1 text-xs font-medium text-zinc-500">固定真实性与尺寸契约（不可编辑）</p>
+                  <pre className="whitespace-pre-wrap text-[11px] leading-relaxed text-zinc-500">{promptRender?.lockedSuffix}</pre>
+                </div>
+                <div className="flex gap-2">
+                  <Input value={promptInstruction} onChange={(e) => setPromptInstruction(e.target.value)} maxLength={1000} placeholder="输入 AI 润色意见" />
+                  <Button variant="outline" onClick={polishImagePrompt} disabled={promptBusy || !promptInstruction.trim()}><Sparkles size={13} /> 预览润色</Button>
+                </div>
+                {promptProposal && <p className="text-xs text-amber-700">当前显示 AI 提案；取消提案不会影响原 Prompt。</p>}
+                <div className="mt-auto flex justify-between">
+                  <Button variant="outline" onClick={savePromptAsTemplate}><Copy size={13} /> 另存模板</Button>
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={() => setPromptTarget(null)}>取消</Button>
+                    <Button onClick={confirmRegeneration} disabled={promptBusy}>确认并重新生成</Button>
+                  </div>
+                </div>
+              </>
+            ) : (() => {
+              const version = promptTarget.version;
+              const parent = version?.parentVersionId
+                ? (versions[promptTarget.item.id] ?? []).find((candidate) => candidate.id === version.parentVersionId)
+                : undefined;
+              const prompt = version?.finalPrompt;
+              return (
+                <>
+                  {version?.generationType === "inpaint" && (
+                    <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-sm text-blue-900">
+                      <p className="font-medium">局部微调指令</p>
+                      <p className="mt-1">{version.instruction || "未记录"}</p>
+                      {parent && <p className="mt-2 text-xs text-blue-700">父版本 Prompt 可追溯：{parent.finalPrompt ? "已记录" : "历史版本未恢复"}</p>}
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between">
+                    <Label>当次完整 Prompt</Label>
+                    {prompt && <Button size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(prompt)}><Copy size={12} /> 复制</Button>}
+                  </div>
+                  {prompt ? (
+                    <pre className="flex-1 overflow-auto whitespace-pre-wrap rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-xs leading-relaxed text-zinc-700">{prompt}</pre>
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-zinc-200 p-6 text-sm text-zinc-500">
+                      此历史流式版本无法从模型日志精确恢复 Prompt，未使用当前上下文推测重建。
+                    </div>
+                  )}
+                  {version?.polishInstruction && <p className="text-xs text-zinc-500">润色意见：{version.polishInstruction}</p>}
+                </>
+              );
+            })()}
+          </div>
+        )}
+      </Sheet>
       <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
     </div>
   );
@@ -1216,9 +1516,10 @@ function ExportToolbar({
 // ---------------------------------------------------------------------------
 
 function SortableItemRow({
-  id, item, index, presets, onChange, onRemove,
+  id, item, index, presets, promptTemplates, onChange, onRemove,
 }: {
   id: string; item: DraftItem; index: number; presets: OutputPreset[];
+  promptTemplates: PromptTemplate[];
   onChange: (patch: Partial<DraftItem>) => void; onRemove: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
@@ -1253,6 +1554,16 @@ function SortableItemRow({
             <div className="flex flex-col gap-1">
               <Label className="text-xs text-zinc-500">构图意图</Label>
               <Textarea rows={2} className="text-xs" value={item.compositionIntent ?? ""} onChange={(e) => onChange({ compositionIntent: e.target.value })} placeholder="如：产品居中白底45度俯角" />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex flex-col gap-1">
+              <Label className="text-xs text-zinc-500">图片 Prompt 模板</Label>
+              <select className="h-7 rounded-md border border-zinc-200 bg-white px-2 text-xs"
+                value={item.promptTemplateId ?? ""} onChange={(e) => onChange({ promptTemplateId: e.target.value || null })}>
+                <option value="">继承批量默认</option>
+                {promptTemplates.map((template) => <option key={template.id} value={template.id}>覆盖：{template.name}</option>)}
+              </select>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -1295,6 +1606,70 @@ function Step1({
   const outputTypes: string[] = JSON.parse(task.outputTypes);
   const hasMain   = outputTypes.includes("main_image");
   const hasDetail = outputTypes.includes("detail_page");
+  const [templates, setTemplates] = useState<PromptTemplate[]>([]);
+  const [promptOpen, setPromptOpen] = useState(false);
+  const [promptRender, setPromptRender] = useState<PromptRender | null>(null);
+  const [promptDraft, setPromptDraft] = useState("");
+  const [polishInstruction, setPolishInstruction] = useState("");
+  const [polishProposal, setPolishProposal] = useState<string | null>(null);
+  const [promptBusy, setPromptBusy] = useState(false);
+
+  useEffect(() => {
+    api.get<PromptTemplate[]>("/settings/prompt-templates?type=design_plan")
+      .then((rows) => {
+        setTemplates(rows);
+        if (!config.planTemplateId) {
+          setConfig({ ...config, planTemplateId: task.planDefaultTemplateId ?? rows.find((row) => row.isDefault)?.id ?? null });
+        }
+      })
+      .catch(() => toast.error("加载方案 Prompt 模板失败"));
+  }, [task.planDefaultTemplateId, config.planTemplateId]);
+
+  async function loadPrompt(templateId = config.planTemplateId) {
+    setPromptBusy(true);
+    try {
+      const rendered = await api.post<PromptRender>("/prompts/render", {
+        type: "design_plan",
+        taskId: task.id,
+        templateId,
+        options: {
+          userIdeas: config.userIdeas,
+          planCount: config.planCount,
+          mainImageCount: hasMain ? config.mainImageCount : 0,
+          detailImageCount: hasDetail ? config.detailImageCount : 0,
+        },
+      });
+      setPromptRender(rendered);
+      setPromptDraft(rendered.editablePrompt);
+      setPolishProposal(null);
+    } catch {
+      toast.error("Prompt 渲染失败");
+    } finally {
+      setPromptBusy(false);
+    }
+  }
+
+  async function openPrompt() {
+    setPromptOpen(true);
+    await loadPrompt();
+  }
+
+  async function polishPrompt() {
+    if (!polishInstruction.trim()) return;
+    setPromptBusy(true);
+    try {
+      const result = await api.post<{ proposal: string }>("/prompts/polish", {
+        type: "design_plan",
+        editablePrompt: promptDraft,
+        instruction: polishInstruction,
+      });
+      setPolishProposal(result.proposal);
+    } catch {
+      toast.error("Prompt 润色失败");
+    } finally {
+      setPromptBusy(false);
+    }
+  }
 
   return (
     <div className="mx-auto max-w-lg px-8 py-10">
@@ -1307,6 +1682,18 @@ function Step1({
           <span className="text-zinc-900">
             {outputTypes.map(t => t === "main_image" ? "主图" : "详情页").join(" + ")}
           </span>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <span className="w-28 shrink-0 text-zinc-400">方案 Prompt</span>
+          <select
+            className="h-8 flex-1 rounded-md border border-zinc-200 bg-white px-2 text-sm"
+            value={config.planTemplateId ?? ""}
+            onChange={(e) => setConfig({ ...config, planTemplateId: e.target.value || null, planEditablePrompt: undefined })}
+          >
+            {templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+          </select>
+          <Button size="sm" variant="outline" onClick={openPrompt}><FileText size={13} /> 查看与编辑</Button>
         </div>
 
         {/* Image counts */}
@@ -1404,6 +1791,41 @@ function Step1({
           <Zap size={14} /> 生成设计方向
         </Button>
       </div>
+
+      <Sheet open={promptOpen} onOpenChange={setPromptOpen} title="方案生成 Prompt" className="w-[620px]">
+        <div className="flex h-full flex-col gap-4 p-5">
+          {promptBusy && !promptRender ? <Loader2 className="animate-spin text-zinc-400" size={18} /> : (
+            <>
+              <div>
+                <Label>可编辑正文</Label>
+                <Textarea rows={16} value={polishProposal ?? promptDraft} onChange={(e) => {
+                  setPolishProposal(null);
+                  setPromptDraft(e.target.value);
+                }} className="mt-1 font-mono text-xs" />
+              </div>
+              <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3">
+                <p className="mb-1 text-xs font-medium text-zinc-500">固定输出契约（不可编辑）</p>
+                <pre className="whitespace-pre-wrap text-[11px] leading-relaxed text-zinc-500">{promptRender?.lockedSuffix}</pre>
+              </div>
+              <div className="flex gap-2">
+                <Input value={polishInstruction} onChange={(e) => setPolishInstruction(e.target.value)} placeholder="输入意见，让 AI 提出润色版本" maxLength={1000} />
+                <Button variant="outline" onClick={polishPrompt} disabled={promptBusy || !polishInstruction.trim()}><Sparkles size={13} /> 润色</Button>
+              </div>
+              {polishProposal && <p className="text-xs text-amber-700">正在预览 AI 提案；取消可恢复当前正文，应用后才用于生成。</p>}
+              <div className="mt-auto flex justify-end gap-2">
+                <Button variant="outline" onClick={() => { setPolishProposal(null); setPromptOpen(false); }}>取消</Button>
+                <Button onClick={() => {
+                  setConfig({ ...config, planEditablePrompt: polishProposal ?? promptDraft });
+                  setPromptDraft(polishProposal ?? promptDraft);
+                  setPolishProposal(null);
+                  setPromptOpen(false);
+                  toast.success("本次方案 Prompt 已应用");
+                }}>应用本次</Button>
+              </div>
+            </>
+          )}
+        </div>
+      </Sheet>
     </div>
   );
 }
@@ -1426,6 +1848,8 @@ export function TaskWizard() {
     planCount: 3,
     mainImageCount: 3,
     detailImageCount: 3,
+    planTemplateId: null,
+    generateRequested: false,
   });
 
   useEffect(() => {
@@ -1500,13 +1924,21 @@ export function TaskWizard() {
             task={task}
             config={step1Config}
             setConfig={setStep1Config}
-            onNext={() => goStep(2)}
+            onNext={() => {
+              setStep1Config((current) => ({ ...current, generateRequested: true }));
+              goStep(2);
+            }}
           />
         )}
         {currentStep === 2 && (
           <Step2
             task={task}
             config={step1Config}
+            onGenerationRequestConsumed={() => {
+              setStep1Config((current) => current.generateRequested
+                ? { ...current, generateRequested: false }
+                : current);
+            }}
             onNext={() => goStep(3)}
           />
         )}
@@ -1516,4 +1948,3 @@ export function TaskWizard() {
     </div>
   );
 }
-

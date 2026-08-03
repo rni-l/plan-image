@@ -3,10 +3,13 @@ import {
   outputPresets,
   modelSceneRoutes,
   modelPricing,
+  promptTemplates,
+  generationTasks,
   type SceneKey,
 } from "./schema.js";
-import { eq, and } from "drizzle-orm";
+import { eq, and, isNull } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
+import { BUILT_IN_PROMPT_TEMPLATES } from "../lib/prompt-templates.js";
 
 const DEFAULT_PRESETS = [
   {
@@ -40,6 +43,68 @@ const SCENE_KEYS: SceneKey[] = [
 /** Run once on startup to ensure default rows exist. Idempotent. */
 export async function seedDefaults(): Promise<void> {
   const now = new Date();
+
+  // Stable built-in prompt templates. Existing rows keep their default flag so
+  // a user's later default choice is never reset during startup.
+  for (const template of BUILT_IN_PROMPT_TEMPLATES) {
+    const [existing] = await db
+      .select({ id: promptTemplates.id })
+      .from(promptTemplates)
+      .where(eq(promptTemplates.id, template.id));
+    if (existing) {
+      await db.update(promptTemplates).set({
+        type: template.type,
+        name: template.name,
+        description: template.description,
+        body: template.body,
+        isBuiltIn: true,
+        archivedAt: null,
+        updatedAt: now,
+      }).where(eq(promptTemplates.id, template.id));
+    } else {
+      await db.insert(promptTemplates).values({
+        ...template,
+        isBuiltIn: true,
+        archivedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+  }
+
+  // Existing tasks predate per-task defaults. Freeze the currently selected
+  // global defaults onto those tasks without overwriting later user choices.
+  const [designDefault] = await db
+    .select({ id: promptTemplates.id })
+    .from(promptTemplates)
+    .where(and(
+      eq(promptTemplates.type, "design_plan"),
+      eq(promptTemplates.isDefault, true),
+      isNull(promptTemplates.archivedAt),
+    ))
+    .limit(1);
+  const [imageDefault] = await db
+    .select({ id: promptTemplates.id })
+    .from(promptTemplates)
+    .where(and(
+      eq(promptTemplates.type, "image_generation"),
+      eq(promptTemplates.isDefault, true),
+      isNull(promptTemplates.archivedAt),
+    ))
+    .limit(1);
+
+  if (designDefault) {
+    await db
+      .update(generationTasks)
+      .set({ planDefaultTemplateId: designDefault.id })
+      .where(isNull(generationTasks.planDefaultTemplateId));
+  }
+  if (imageDefault) {
+    await db
+      .update(generationTasks)
+      .set({ imageDefaultTemplateId: imageDefault.id })
+      .where(isNull(generationTasks.imageDefaultTemplateId));
+  }
 
   // Default output presets — only insert if none exist
   const existingPresets = await db.select({ id: outputPresets.id }).from(outputPresets).limit(1);

@@ -14,6 +14,7 @@ import { settingsRouter } from "./routes/settings.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { logsRouter } from "./routes/logs.js";
 import { billingRouter } from "./routes/billing.js";
+import { promptsRouter } from "./routes/prompts.js";
 import { requestLoggerMiddleware } from "./middleware/request-logger.js";
 import { recoverInterruptedJobs, startWorker, stopWorker } from "./jobs/worker.js";
 import { seedDefaults } from "./db/seed.js";
@@ -80,6 +81,7 @@ api.route("/settings", settingsRouter);
 api.route("/jobs", jobsRouter);
 api.route("/logs", logsRouter);
 api.route("/billing", billingRouter);
+api.route("/prompts", promptsRouter);
 
 api.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 

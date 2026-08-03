@@ -179,7 +179,8 @@ export async function gatewayCall(
  */
 export async function* gatewayTextStream(
   scene: SceneKey,
-  req: Omit<GatewayRequest, "model">
+  req: Omit<GatewayRequest, "model">,
+  jobId?: string,
 ): AsyncGenerator<TextStreamChunk> {
   const [route] = await db
     .select()
@@ -217,10 +218,37 @@ export async function* gatewayTextStream(
   };
 
   if (adapter.sendTextStream) {
-    yield* adapter.sendTextStream(fullReq);
+    const startMs = Date.now();
+    let responseText = "";
+    try {
+      for await (const chunk of adapter.sendTextStream(fullReq)) {
+        responseText += chunk.text;
+        yield chunk;
+      }
+      await db.insert(modelCallLogs).values({
+        id: randomUUID(), jobId: jobId ?? null, scene, provider: provider.name,
+        model: route.billingModelId ?? route.modelId, status: "succeeded",
+        errorType: null, errorMessage: null, requestPrompt: req.prompt,
+        requestParams: buildRequestParams(req), responseBody: responseText,
+        durationMs: Date.now() - startMs, promptTokens: null, completionTokens: null,
+        totalTokens: null, inputImageCount: null, outputImageCount: null, createdAt: new Date(),
+      }).catch(() => {});
+    } catch (err) {
+      const ge = err instanceof GatewayError ? err : null;
+      await db.insert(modelCallLogs).values({
+        id: randomUUID(), jobId: jobId ?? null, scene, provider: provider.name,
+        model: route.billingModelId ?? route.modelId, status: "failed",
+        errorType: ge?.type ?? "unknown",
+        errorMessage: ge?.message ?? (err instanceof Error ? err.message : String(err)),
+        requestPrompt: req.prompt, requestParams: buildRequestParams(req), responseBody: null,
+        durationMs: Date.now() - startMs, promptTokens: null, completionTokens: null,
+        totalTokens: null, inputImageCount: null, outputImageCount: null, createdAt: new Date(),
+      }).catch(() => {});
+      throw err;
+    }
   } else {
     // Non-streaming fallback: use gatewayCall so the request gets properly logged
-    const result = await gatewayCall(scene, req);
+    const result = await gatewayCall(scene, req, jobId);
     if (result.text) {
       yield { text: result.text, done: true };
     } else {
@@ -231,7 +259,8 @@ export async function* gatewayTextStream(
 
 export async function* gatewayStream(
   scene: SceneKey,
-  req: Omit<GatewayRequest, "model">
+  req: Omit<GatewayRequest, "model">,
+  jobId?: string,
 ): AsyncGenerator<ImageStreamChunk> {
   const [route] = await db
     .select()
@@ -269,10 +298,60 @@ export async function* gatewayStream(
   };
 
   if (adapter.sendStream) {
-    yield* adapter.sendStream(fullReq);
+    const startMs = Date.now();
+    let outputProduced = false;
+    try {
+      for await (const chunk of adapter.sendStream(fullReq)) {
+        if (chunk.b64) outputProduced = true;
+        yield chunk;
+      }
+      await db.insert(modelCallLogs).values({
+        id: randomUUID(),
+        jobId: jobId ?? null,
+        scene,
+        provider: provider.name,
+        model: route.billingModelId ?? route.modelId,
+        status: "succeeded",
+        errorType: null,
+        errorMessage: null,
+        requestPrompt: req.prompt,
+        requestParams: buildRequestParams(req),
+        responseBody: outputProduced ? "[streamed image]" : null,
+        durationMs: Date.now() - startMs,
+        promptTokens: null,
+        completionTokens: null,
+        totalTokens: null,
+        inputImageCount: req.images?.length ?? 0,
+        outputImageCount: outputProduced ? 1 : 0,
+        createdAt: new Date(),
+      }).catch(() => {});
+    } catch (err) {
+      const ge = err instanceof GatewayError ? err : null;
+      await db.insert(modelCallLogs).values({
+        id: randomUUID(),
+        jobId: jobId ?? null,
+        scene,
+        provider: provider.name,
+        model: route.billingModelId ?? route.modelId,
+        status: "failed",
+        errorType: ge?.type ?? "unknown",
+        errorMessage: ge?.message ?? (err instanceof Error ? err.message : String(err)),
+        requestPrompt: req.prompt,
+        requestParams: buildRequestParams(req),
+        responseBody: null,
+        durationMs: Date.now() - startMs,
+        promptTokens: null,
+        completionTokens: null,
+        totalTokens: null,
+        inputImageCount: req.images?.length ?? 0,
+        outputImageCount: 0,
+        createdAt: new Date(),
+      }).catch(() => {});
+      throw err;
+    }
   } else {
     // Non-streaming fallback: single chunk on completion
-    const result = await adapter.send(fullReq);
+    const result = await gatewayCall(scene, req, jobId);
     if (result.image) {
       yield { b64: result.image, done: true };
     } else {

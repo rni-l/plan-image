@@ -4,15 +4,189 @@ import {
   modelProviders,
   modelSceneRoutes,
   outputPresets,
+  promptTemplates,
+  type PromptTemplateType,
 } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { invalidateAdapterCache } from "../gateway/index.js";
 import path from "node:path";
 import { paths } from "../lib/paths.js";
+import { allowedVariablesFor, validateTemplateBody } from "../lib/prompt-service.js";
 
 export const settingsRouter = new Hono();
+
+function isPromptTemplateType(value: string): value is PromptTemplateType {
+  return value === "design_plan" || value === "image_generation";
+}
+
+function validateTemplateFields(input: {
+  type: PromptTemplateType;
+  name: string;
+  description?: string | null;
+  body: string;
+}): void {
+  if (!input.name.trim()) throw new Error("模板名称不能为空");
+  if (input.name.trim().length > 100) throw new Error("模板名称不能超过 100 字");
+  if ((input.description?.length ?? 0) > 500) throw new Error("模板说明不能超过 500 字");
+  validateTemplateBody(input.body, allowedVariablesFor(input.type));
+}
+
+async function setDefaultPromptTemplate(id: string): Promise<typeof promptTemplates.$inferSelect | undefined> {
+  const [template] = await db.select().from(promptTemplates).where(eq(promptTemplates.id, id));
+  if (!template || template.archivedAt) return undefined;
+  await db.update(promptTemplates)
+    .set({ isDefault: false, updatedAt: new Date() })
+    .where(eq(promptTemplates.type, template.type));
+  await db.update(promptTemplates)
+    .set({ isDefault: true, updatedAt: new Date() })
+    .where(eq(promptTemplates.id, id));
+  const [updated] = await db.select().from(promptTemplates).where(eq(promptTemplates.id, id));
+  return updated;
+}
+
+// ---------------------------------------------------------------------------
+// Prompt templates
+// ---------------------------------------------------------------------------
+
+settingsRouter.get("/prompt-templates", async (c) => {
+  const rawType = c.req.query("type");
+  if (rawType && !isPromptTemplateType(rawType)) return c.json({ error: "无效的模板类型" }, 400);
+  const type: PromptTemplateType | undefined = rawType && isPromptTemplateType(rawType) ? rawType : undefined;
+  const includeArchived = c.req.query("includeArchived") === "true";
+  const filters = [];
+  if (type) filters.push(eq(promptTemplates.type, type));
+  if (!includeArchived) filters.push(isNull(promptTemplates.archivedAt));
+  const rows = await db.select().from(promptTemplates)
+    .where(filters.length ? and(...filters) : undefined)
+    .orderBy(asc(promptTemplates.type), asc(promptTemplates.isBuiltIn), asc(promptTemplates.createdAt));
+  return c.json(rows);
+});
+
+settingsRouter.post("/prompt-templates", async (c) => {
+  const body = await c.req.json<{
+    type: string;
+    name: string;
+    description?: string | null;
+    body: string;
+    isDefault?: boolean;
+  }>();
+  if (!isPromptTemplateType(body.type)) return c.json({ error: "无效的模板类型" }, 400);
+  try {
+    validateTemplateFields({
+      type: body.type,
+      name: body.name ?? "",
+      body: body.body ?? "",
+      ...(body.description !== undefined ? { description: body.description } : {}),
+    });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+
+  const id = randomUUID();
+  const now = new Date();
+  await db.insert(promptTemplates).values({
+    id,
+    type: body.type,
+    name: body.name.trim(),
+    description: body.description?.trim() || null,
+    body: body.body,
+    isBuiltIn: false,
+    isDefault: false,
+    archivedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  if (body.isDefault) await setDefaultPromptTemplate(id);
+  const [created] = await db.select().from(promptTemplates).where(eq(promptTemplates.id, id));
+  return c.json(created, 201);
+});
+
+settingsRouter.patch("/prompt-templates/:id", async (c) => {
+  const id = c.req.param("id");
+  const [existing] = await db.select().from(promptTemplates).where(eq(promptTemplates.id, id));
+  if (!existing) return c.json({ error: "模板不存在" }, 404);
+  if (existing.isBuiltIn) return c.json({ error: "内置模板只读，请复制后修改" }, 403);
+  if (existing.archivedAt) return c.json({ error: "已归档模板不能修改" }, 409);
+
+  const body = await c.req.json<Partial<{ name: string; description: string | null; body: string }>>();
+  const next = {
+    type: existing.type,
+    name: body.name ?? existing.name,
+    description: body.description === undefined ? existing.description : body.description,
+    body: body.body ?? existing.body,
+  };
+  try {
+    validateTemplateFields(next);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+  await db.update(promptTemplates).set({
+    name: next.name.trim(),
+    description: next.description?.trim() || null,
+    body: next.body,
+    updatedAt: new Date(),
+  }).where(eq(promptTemplates.id, id));
+  const [updated] = await db.select().from(promptTemplates).where(eq(promptTemplates.id, id));
+  return c.json(updated);
+});
+
+settingsRouter.post("/prompt-templates/:id/copy", async (c) => {
+  const id = c.req.param("id");
+  const [source] = await db.select().from(promptTemplates).where(eq(promptTemplates.id, id));
+  if (!source) return c.json({ error: "模板不存在" }, 404);
+  const body: { name?: string } = await c.req.json<{ name?: string }>().catch(() => ({}));
+  const now = new Date();
+  const copyId = randomUUID();
+  await db.insert(promptTemplates).values({
+    id: copyId,
+    type: source.type,
+    name: body.name?.trim() || `${source.name}（副本）`,
+    description: source.description,
+    body: source.body,
+    isBuiltIn: false,
+    isDefault: false,
+    archivedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const [created] = await db.select().from(promptTemplates).where(eq(promptTemplates.id, copyId));
+  return c.json(created, 201);
+});
+
+settingsRouter.post("/prompt-templates/:id/default", async (c) => {
+  const updated = await setDefaultPromptTemplate(c.req.param("id"));
+  if (!updated) return c.json({ error: "模板不存在或已归档" }, 404);
+  return c.json(updated);
+});
+
+settingsRouter.post("/prompt-templates/:id/archive", async (c) => {
+  const id = c.req.param("id");
+  const [template] = await db.select().from(promptTemplates).where(eq(promptTemplates.id, id));
+  if (!template) return c.json({ error: "模板不存在" }, 404);
+  if (template.isBuiltIn) return c.json({ error: "内置模板不能归档" }, 403);
+  if (template.archivedAt) return c.json(template);
+  const body: { replacementTemplateId?: string } = await c.req.json<{ replacementTemplateId?: string }>().catch(() => ({}));
+  if (template.isDefault && !body.replacementTemplateId) {
+    return c.json({ error: "归档默认模板前必须指定替代默认模板" }, 409);
+  }
+  if (body.replacementTemplateId) {
+    const [replacement] = await db.select().from(promptTemplates)
+      .where(eq(promptTemplates.id, body.replacementTemplateId));
+    if (!replacement || replacement.type !== template.type || replacement.archivedAt || replacement.id === id) {
+      return c.json({ error: "替代模板不存在、类型不符或已归档" }, 400);
+    }
+    await setDefaultPromptTemplate(replacement.id);
+  }
+  await db.update(promptTemplates).set({
+    isDefault: false,
+    archivedAt: new Date(),
+    updatedAt: new Date(),
+  }).where(eq(promptTemplates.id, id));
+  const [archived] = await db.select().from(promptTemplates).where(eq(promptTemplates.id, id));
+  return c.json(archived);
+});
 
 // ---------------------------------------------------------------------------
 // Model providers

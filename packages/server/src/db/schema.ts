@@ -106,6 +106,26 @@ export const synthesisReports = sqliteTable("synthesis_reports", {
 });
 
 // ---------------------------------------------------------------------------
+// Prompt templates
+// ---------------------------------------------------------------------------
+
+export type PromptTemplateType = "design_plan" | "image_generation";
+
+export const promptTemplates = sqliteTable("prompt_templates", {
+  id: text("id").primaryKey(),
+  type: text("type").$type<PromptTemplateType>().notNull(),
+  name: text("name").notNull(),
+  description: text("description"),
+  body: text("body").notNull(),
+  /** Built-in templates are immutable and can only be copied. */
+  isBuiltIn: integer("is_built_in", { mode: "boolean" }).notNull().default(false),
+  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+  /** Custom templates use soft deletion so historic references remain readable. */
+  archivedAt: integer("archived_at", { mode: "timestamp" }),
+  ...timestamps,
+});
+
+// ---------------------------------------------------------------------------
 // Generation tasks
 // ---------------------------------------------------------------------------
 
@@ -128,6 +148,12 @@ export const generationTasks = sqliteTable("generation_tasks", {
   description: text("description"),
   /** Frozen snapshot of model routing + output presets at creation time */
   configSnapshot: text("config_snapshot").notNull(),
+  planDefaultTemplateId: text("plan_default_template_id").references(() => promptTemplates.id),
+  imageDefaultTemplateId: text("image_default_template_id").references(() => promptTemplates.id),
+  /** Most recently confirmed design-plan prompt, including the locked contract. */
+  latestPlanPromptSnapshot: text("latest_plan_prompt_snapshot"),
+  /** Persisted Step 2 selection; intentionally not constrained to avoid a circular FK. */
+  draftSelectedDirectionId: text("draft_selected_direction_id"),
   currentStep: integer("current_step").notNull().default(1),
   ...timestamps,
 });
@@ -186,6 +212,8 @@ export const imageItems = sqliteTable("image_items", {
   productAssetId: text("product_asset_id"),
   /** JSON array of reference asset ids */
   referenceAssetIds: text("reference_asset_ids"),
+  /** Optional per-image override; null inherits the task image template. */
+  promptTemplateId: text("prompt_template_id").references(() => promptTemplates.id),
   /** Frozen output preset snapshot at plan confirmation */
   outputPresetSnapshot: text("output_preset_snapshot").notNull(),
   ...timestamps,
@@ -209,6 +237,12 @@ export const imageVersions = sqliteTable("image_versions", {
   maskPath: text("mask_path"),
   /** Natural language instruction (inpaint only) */
   instruction: text("instruction"),
+  /** Template selected for this generation; may reference an archived template. */
+  promptTemplateId: text("prompt_template_id").references(() => promptTemplates.id),
+  /** Exact final user prompt sent to the model, including the locked suffix. */
+  finalPrompt: text("final_prompt"),
+  /** User instruction that produced an AI-polished prompt proposal. */
+  polishInstruction: text("polish_instruction"),
   /** 1 = this is the currently selected version for the item */
   isSelected: integer("is_selected", { mode: "boolean" }).notNull().default(false),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
@@ -340,7 +374,7 @@ export const modelCallLogs = sqliteTable("model_call_logs", {
    */
   outputImageCount: integer("output_image_count"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
-  // NOTE: prompt text, request headers, and API keys are never stored here
+  // NOTE: request headers and API keys are never stored here
 });
 
 // ---------------------------------------------------------------------------

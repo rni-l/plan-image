@@ -5,8 +5,9 @@ import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { CheckCircle, Circle, Plus, Trash2, Save } from "lucide-react";
+import { Archive, CheckCircle, Circle, Copy, FileText, Plus, Save, Star, Trash2 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,6 +42,17 @@ interface OutputPreset {
   isDefault: boolean;
 }
 
+interface PromptTemplate {
+  id: string;
+  type: "design_plan" | "image_generation";
+  name: string;
+  description: string | null;
+  body: string;
+  isBuiltIn: boolean;
+  isDefault: boolean;
+  archivedAt: number | null;
+}
+
 // ---------------------------------------------------------------------------
 // Shell
 // ---------------------------------------------------------------------------
@@ -49,6 +61,7 @@ const SECTIONS = [
   { to: "/settings/models",  label: "模型供应商" },
   { to: "/settings/routing", label: "场景路由" },
   { to: "/settings/presets", label: "输出预设" },
+  { to: "/settings/prompts", label: "Prompt 管理" },
 ] as const;
 
 export function SettingsPage() {
@@ -81,6 +94,7 @@ export function SettingsPage() {
         {section === "models"  && <ModelsSection />}
         {section === "routing" && <RoutingSection />}
         {section === "presets" && <PresetsSection />}
+        {section === "prompts" && <PromptTemplatesSection />}
       </div>
     </div>
   );
@@ -371,6 +385,214 @@ function RoutingSection() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Prompt template management
+// ---------------------------------------------------------------------------
+
+const PROMPT_VARIABLES: Record<PromptTemplate["type"], string[]> = {
+  design_plan: [
+    "product_name", "product_notes", "product_specifications", "selling_points",
+    "product_visual_analysis", "competitor_insights", "user_ideas", "plan_count",
+    "main_image_count", "detail_image_count", "output_types", "product_asset_ids",
+  ],
+  image_generation: [
+    "product_name", "product_specifications", "product_selling_points", "product_visual_description",
+    "direction_label", "direction_positioning", "direction_color_scheme", "direction_layout_intent",
+    "direction_copy_strategy", "image_list_type", "image_title", "image_description",
+    "image_selling_points", "image_suggested_copy", "image_composition_intent", "image_lighting",
+    "image_angle", "image_background", "image_mood", "image_visual_elements", "product_asset_id",
+    "reference_asset_ids", "width", "height", "aspect_ratio",
+  ],
+};
+
+const SAMPLE_CONTEXT: Record<string, string | number> = {
+  product_name: "示例商品", product_notes: "轻巧便携", product_specifications: "容量=500ml",
+  selling_points: "便携；易清洁", product_visual_analysis: "白色圆柱形机身",
+  competitor_insights: "同类多使用纯白背景", user_ideas: "清爽夏日感", plan_count: 3,
+  main_image_count: 3, detail_image_count: 3, output_types: "主图 + 详情页图", product_asset_ids: "asset-1",
+  product_selling_points: "便携；易清洁", product_visual_description: "白色圆柱形机身",
+  direction_label: "清爽夏日", direction_positioning: "年轻通勤人群", direction_color_scheme: "薄荷绿与白色",
+  direction_layout_intent: "商品居中，左侧留白", direction_copy_strategy: "短句直接",
+  image_list_type: "主图", image_title: "清爽主图", image_description: "突出便携使用",
+  image_selling_points: "便携、易清洁", image_suggested_copy: "随时鲜榨", image_composition_intent: "商品居中",
+  image_lighting: "柔和自然光", image_angle: "前侧45度", image_background: "薄荷绿渐变",
+  image_mood: "清爽、轻盈", image_visual_elements: "商品、水果、冰块", product_asset_id: "asset-1",
+  reference_asset_ids: "", width: 1000, height: 1000, aspect_ratio: "1:1",
+};
+
+function PromptTemplatesSection() {
+  const [templates, setTemplates] = useState<PromptTemplate[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<{ type: PromptTemplate["type"]; name: string; description: string; body: string }>({
+    type: "design_plan", name: "", description: "", body: "",
+  });
+  const [preview, setPreview] = useState<{ finalPrompt: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [archiveReplacementId, setArchiveReplacementId] = useState("");
+
+  const load = () => api.get<PromptTemplate[]>("/settings/prompt-templates")
+    .then((rows) => {
+      setTemplates(rows);
+      if (!selectedId && rows[0]) selectTemplate(rows[0], false);
+    })
+    .catch(() => toast.error("加载 Prompt 模板失败"));
+
+  useEffect(() => { load(); }, []);
+
+  function selectTemplate(template: PromptTemplate, updateSelection = true) {
+    if (updateSelection) setSelectedId(template.id);
+    else setSelectedId(template.id);
+    setDraft({ type: template.type, name: template.name, description: template.description ?? "", body: template.body });
+    setPreview(null);
+    setArchiveReplacementId("");
+  }
+
+  function newTemplate(type: PromptTemplate["type"]) {
+    setSelectedId("new");
+    setDraft({ type, name: "", description: "", body: "" });
+    setPreview(null);
+    setArchiveReplacementId("");
+  }
+
+  async function saveTemplate() {
+    if (!draft.name.trim() || !draft.body.trim()) return;
+    setSaving(true);
+    try {
+      if (selectedId === "new") {
+        const created = await api.post<PromptTemplate>("/settings/prompt-templates", draft);
+        await load();
+        selectTemplate(created);
+      } else if (selectedId) {
+        const updated = await api.patch<PromptTemplate>(`/settings/prompt-templates/${selectedId}`, {
+          name: draft.name, description: draft.description, body: draft.body,
+        });
+        setTemplates((rows) => rows.map((row) => row.id === updated.id ? updated : row));
+        selectTemplate(updated);
+      }
+      toast.success("Prompt 模板已保存");
+    } catch {
+      toast.error("保存失败，请检查模板变量和条件块");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function previewTemplate() {
+    try {
+      const result = await api.post<{ finalPrompt: string }>("/prompts/render", {
+        type: draft.type,
+        templateBody: draft.body,
+        contextVariables: SAMPLE_CONTEXT,
+      });
+      setPreview(result);
+    } catch {
+      toast.error("模板无法渲染，请检查未知变量或未闭合条件块");
+    }
+  }
+
+  async function copyTemplate(template: PromptTemplate) {
+    const created = await api.post<PromptTemplate>(`/settings/prompt-templates/${template.id}/copy`, {});
+    await load();
+    selectTemplate(created);
+    toast.success("已复制为自定义模板");
+  }
+
+  async function makeDefault(template: PromptTemplate) {
+    await api.post(`/settings/prompt-templates/${template.id}/default`, {});
+    await load();
+    toast.success("已设为默认模板");
+  }
+
+  async function archiveTemplate(template: PromptTemplate) {
+    if (template.isDefault && !archiveReplacementId) {
+      toast.error("请先指定替代默认模板");
+      return;
+    }
+    await api.post(`/settings/prompt-templates/${template.id}/archive`, template.isDefault
+      ? { replacementTemplateId: archiveReplacementId }
+      : {});
+    setSelectedId(null);
+    await load();
+    toast.success("模板已归档");
+  }
+
+  const selected = templates.find((template) => template.id === selectedId);
+  return (
+    <div className="max-w-6xl">
+      <div className="mb-6">
+        <h2 className="section-title mb-1 text-base text-zinc-900">Prompt 管理</h2>
+        <p className="text-sm text-zinc-500">内置模板只读；自定义模板支持默认切换和软归档。固定输出契约始终锁定。</p>
+      </div>
+      <div className="grid grid-cols-2 gap-4">
+        {(["design_plan", "image_generation"] as const).map((type) => (
+          <div key={type} className="overflow-hidden rounded-lg border border-zinc-200">
+            <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-3 py-2">
+              <span className="text-sm font-medium">{type === "design_plan" ? "方案生成" : "图片生成"}</span>
+              <Button size="sm" variant="outline" className="h-7" onClick={() => newTemplate(type)}><Plus size={12} /> 新建</Button>
+            </div>
+            <div className="divide-y divide-zinc-100">
+              {templates.filter((template) => template.type === type).map((template) => (
+                <button key={template.id} onClick={() => selectTemplate(template)}
+                  className={`flex w-full items-center gap-2 px-3 py-2 text-left ${selectedId === template.id ? "bg-zinc-100" : "hover:bg-zinc-50"}`}>
+                  <FileText size={13} className="text-zinc-400" />
+                  <span className="flex-1 truncate text-sm">{template.name}</span>
+                  {template.isBuiltIn && <Badge variant="secondary">内置</Badge>}
+                  {template.isDefault && <Star size={12} className="fill-amber-400 text-amber-400" />}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {selectedId && (
+        <div className="mt-6 grid grid-cols-[1fr_280px] gap-5 rounded-lg border border-zinc-200 p-5">
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div><Label>模板名称</Label><Input className="mt-1" value={draft.name} disabled={selected?.isBuiltIn} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
+              <div><Label>说明</Label><Input className="mt-1" value={draft.description} disabled={selected?.isBuiltIn} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></div>
+            </div>
+            <div><Label>模板正文</Label><Textarea rows={16} className="mt-1 font-mono text-xs" value={draft.body} disabled={selected?.isBuiltIn} onChange={(e) => setDraft({ ...draft, body: e.target.value })} /></div>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={previewTemplate}>最终预览</Button>
+              {selected?.isBuiltIn ? (
+                <Button onClick={() => copyTemplate(selected)}><Copy size={13} /> 复制后编辑</Button>
+              ) : (
+                <Button onClick={saveTemplate} disabled={saving || !draft.name.trim() || !draft.body.trim()}><Save size={13} /> 保存</Button>
+              )}
+              {selected && !selected.isDefault && <Button variant="outline" onClick={() => makeDefault(selected)}><Star size={13} /> 设为默认</Button>}
+              {selected && !selected.isBuiltIn && <Button variant="outline" onClick={() => archiveTemplate(selected)}><Archive size={13} /> 归档</Button>}
+            </div>
+            {selected?.isDefault && !selected.isBuiltIn && (
+              <div>
+                <Label>归档后的替代默认模板</Label>
+                <select
+                  className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm"
+                  value={archiveReplacementId}
+                  onChange={(event) => setArchiveReplacementId(event.target.value)}
+                >
+                  <option value="">请先选择替代模板</option>
+                  {templates
+                    .filter((template) => template.type === selected.type && template.id !== selected.id && !template.archivedAt)
+                    .map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+                </select>
+              </div>
+            )}
+            {preview && <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-zinc-950 p-4 text-[11px] leading-relaxed text-zinc-100">{preview.finalPrompt}</pre>}
+          </div>
+          <aside>
+            <p className="mb-2 text-xs font-medium text-zinc-700">可用变量</p>
+            <div className="flex flex-wrap gap-1.5">
+              {PROMPT_VARIABLES[draft.type].map((variable) => <code key={variable} className="rounded bg-zinc-100 px-1.5 py-1 text-[10px] text-zinc-600">{`{{${variable}}}`}</code>)}
+            </div>
+            <p className="mt-4 text-xs leading-relaxed text-zinc-500">条件语法：<code>{"{{#if variable}}...{{/if}}"}</code>。不支持嵌套；未知变量和未闭合条件会阻止保存。</p>
+          </aside>
+        </div>
+      )}
     </div>
   );
 }
