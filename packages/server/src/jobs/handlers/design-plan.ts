@@ -13,12 +13,15 @@ import {
 import { eq } from "drizzle-orm";
 import { gatewayCall } from "../../gateway/index.js";
 import { randomUUID } from "node:crypto";
+import { resolveDefaultModelRoute, type ModelRouteSnapshot } from "../../gateway/model-route.js";
 import { analyseAndPersistAsset } from "../../lib/product-analysis.js";
 import { renderDesignPlanPromptSnapshot } from "../../lib/prompt-service.js";
 
 export interface DesignPlanInput {
   taskId: string;
   productId: string;
+  modelRoute?: ModelRouteSnapshot;
+  productAnalysisRoute?: ModelRouteSnapshot;
 }
 
 const SYSTEM_PROMPT = `你是一位顶级的电商视觉创意总监，擅长将商品特性与竞品洞察转化为可落地执行的视觉方案。
@@ -107,7 +110,7 @@ export async function handleDesignPlan(
   // --- Analyse product images (fills in .analysis on DB rows) ---
   const assets = await Promise.all(
     rawAssets.map(async (a) => {
-      const parsedAnalysis = await analyseAndPersistAsset(a);
+      const parsedAnalysis = await analyseAndPersistAsset(a, false, input.productAnalysisRoute);
       return { ...a, parsedAnalysis };
     })
   );
@@ -245,7 +248,7 @@ ${assetIdNote}
     latestPlanPromptSnapshot: prompt,
     updatedAt: new Date(),
   }).where(eq(generationTasks.id, input.taskId));
-  const response = await gatewayCall("design_plan", { scene: "design_plan", prompt, systemPrompt: SYSTEM_PROMPT }, _jobId);
+  const response = await gatewayCall(input.modelRoute ?? await resolveDefaultModelRoute("design_plan"), { scene: "design_plan", prompt, systemPrompt: SYSTEM_PROMPT }, _jobId);
 
   // Parse directions from model output
   const text = response.text ?? "";

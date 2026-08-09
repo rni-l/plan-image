@@ -5,6 +5,7 @@ import { gatewayCall } from "../../gateway/index.js";
 import { saveImageAsset } from "../../lib/storage.js";
 import { buildImageGenerationPromptData } from "../../lib/prompt-service.js";
 import { randomUUID } from "node:crypto";
+import { resolveDefaultModelRoute, type ModelRouteSnapshot } from "../../gateway/model-route.js";
 
 export interface ImageGenerationInput {
   imageItemId: string;
@@ -15,6 +16,7 @@ export interface ImageGenerationInput {
   width: number;
   height: number;
   generationType: "initial" | "regeneration";
+  modelRoute: ModelRouteSnapshot;
 }
 
 export async function handleImageGeneration(
@@ -28,7 +30,7 @@ export async function handleImageGeneration(
 
   // Call image generation via gateway, passing the product photo as a reference image
   const response = await gatewayCall(
-    "image_generation",
+    input.modelRoute ?? await resolveDefaultModelRoute("image_generation"),
     {
       scene: "image_generation",
       prompt: input.finalPrompt,

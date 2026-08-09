@@ -1,12 +1,12 @@
 import { db } from "../db/index.js";
-import { modelProviders, modelSceneRoutes, modelCallLogs, type SceneKey } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { modelCallLogs } from "../db/schema.js";
 import type { ModelAdapter, GatewayRequest, GatewayResponse, ImageStreamChunk, TextStreamChunk } from "./types.js";
 import { GatewayError } from "./types.js";
 import { BailianAdapter } from "./adapters/bailian.js";
 import { VolcengineAdapter } from "./adapters/volcengine.js";
 import { GptProxyAdapter } from "./adapters/gpt-proxy.js";
 import { randomUUID } from "node:crypto";
+import type { ModelRouteSnapshot } from "./model-route.js";
 
 export type { TextStreamChunk };
 
@@ -62,39 +62,11 @@ function buildRequestParams(req: Omit<GatewayRequest, "model">): string {
  * @param jobId  Optional background_jobs.id to link in model_call_logs
  */
 export async function gatewayCall(
-  scene: SceneKey,
+  route: ModelRouteSnapshot,
   req: Omit<GatewayRequest, "model">,
   jobId?: string
 ): Promise<GatewayResponse> {
-  const [route] = await db
-    .select()
-    .from(modelSceneRoutes)
-    .where(eq(modelSceneRoutes.scene, scene));
-
-  if (!route?.providerId || !route.modelId) {
-    throw new GatewayError(
-      "capability_not_supported",
-      `场景 "${scene}" 尚未配置模型，请在设置页完成路由配置`
-    );
-  }
-
-  // Load provider record
-  const [provider] = await db
-    .select()
-    .from(modelProviders)
-    .where(eq(modelProviders.id, route.providerId));
-
-  if (!provider?.isConfigured) {
-    throw new GatewayError(
-      "authentication_failed",
-      `供应商 "${provider?.name ?? route.providerId}" 未配置 API 密钥`
-    );
-  }
-
-  const adapter = buildAdapter(provider.name, provider.baseUrl, route.modelId);
-
-  // Parse extra parameters from route config
-  const extraParams = route.parameters ? (JSON.parse(route.parameters) as Record<string, unknown>) : {};
+  const adapter = buildAdapter(route.provider, route.baseUrl, route.modelId);
 
   const startMs = Date.now();
   let result: GatewayResponse;
@@ -102,7 +74,7 @@ export async function gatewayCall(
     result = await adapter.send({
       ...req,
       model: route.modelId,
-      parameters: { ...extraParams, ...(req.parameters ?? {}) },
+      parameters: { ...route.parameters, ...(req.parameters ?? {}) },
     });
   } catch (err) {
     const durationMs = Date.now() - startMs;
@@ -110,8 +82,9 @@ export async function gatewayCall(
     await db.insert(modelCallLogs).values({
       id: randomUUID(),
       jobId: jobId ?? null,
-      scene,
-      provider: provider.name,
+      scene: route.scene,
+      modelRouteId: route.routeId,
+      provider: route.provider,
       // Use billingModelId when set so the billing join hits the correct pricing row.
       // The actual request model is captured in requestParams._sentBody.
       model: route.billingModelId ?? route.modelId,
@@ -147,8 +120,9 @@ export async function gatewayCall(
   await db.insert(modelCallLogs).values({
     id: randomUUID(),
     jobId: jobId ?? null,
-    scene,
-    provider: provider.name,
+    scene: route.scene,
+    modelRouteId: route.routeId,
+    provider: route.provider,
     // Use billingModelId when set so the billing join hits the correct pricing row.
     // The actual request model is captured in requestParams._sentBody.
     model: route.billingModelId ?? route.modelId,
@@ -178,43 +152,16 @@ export async function gatewayCall(
  * a single-chunk wrapper around send().
  */
 export async function* gatewayTextStream(
-  scene: SceneKey,
+  route: ModelRouteSnapshot,
   req: Omit<GatewayRequest, "model">,
   jobId?: string,
 ): AsyncGenerator<TextStreamChunk> {
-  const [route] = await db
-    .select()
-    .from(modelSceneRoutes)
-    .where(eq(modelSceneRoutes.scene, scene));
-
-  if (!route?.providerId || !route.modelId) {
-    throw new GatewayError(
-      "capability_not_supported",
-      `场景 "${scene}" 尚未配置模型，请在设置页完成路由配置`
-    );
-  }
-
-  const [provider] = await db
-    .select()
-    .from(modelProviders)
-    .where(eq(modelProviders.id, route.providerId));
-
-  if (!provider?.isConfigured) {
-    throw new GatewayError(
-      "authentication_failed",
-      `供应商 "${provider?.name ?? route.providerId}" 未配置 API 密钥`
-    );
-  }
-
-  const adapter = buildAdapter(provider.name, provider.baseUrl, route.modelId);
-  const extraParams = route.parameters
-    ? (JSON.parse(route.parameters) as Record<string, unknown>)
-    : {};
+  const adapter = buildAdapter(route.provider, route.baseUrl, route.modelId);
 
   const fullReq: GatewayRequest = {
     ...req,
     model: route.modelId,
-    parameters: { ...extraParams, ...(req.parameters ?? {}) },
+    parameters: { ...route.parameters, ...(req.parameters ?? {}) },
   };
 
   if (adapter.sendTextStream) {
@@ -226,7 +173,7 @@ export async function* gatewayTextStream(
         yield chunk;
       }
       await db.insert(modelCallLogs).values({
-        id: randomUUID(), jobId: jobId ?? null, scene, provider: provider.name,
+        id: randomUUID(), jobId: jobId ?? null, scene: route.scene, modelRouteId: route.routeId, provider: route.provider,
         model: route.billingModelId ?? route.modelId, status: "succeeded",
         errorType: null, errorMessage: null, requestPrompt: req.prompt,
         requestParams: buildRequestParams(req), responseBody: responseText,
@@ -236,7 +183,7 @@ export async function* gatewayTextStream(
     } catch (err) {
       const ge = err instanceof GatewayError ? err : null;
       await db.insert(modelCallLogs).values({
-        id: randomUUID(), jobId: jobId ?? null, scene, provider: provider.name,
+        id: randomUUID(), jobId: jobId ?? null, scene: route.scene, modelRouteId: route.routeId, provider: route.provider,
         model: route.billingModelId ?? route.modelId, status: "failed",
         errorType: ge?.type ?? "unknown",
         errorMessage: ge?.message ?? (err instanceof Error ? err.message : String(err)),
@@ -248,7 +195,7 @@ export async function* gatewayTextStream(
     }
   } else {
     // Non-streaming fallback: use gatewayCall so the request gets properly logged
-    const result = await gatewayCall(scene, req, jobId);
+    const result = await gatewayCall(route, req, jobId);
     if (result.text) {
       yield { text: result.text, done: true };
     } else {
@@ -258,43 +205,16 @@ export async function* gatewayTextStream(
 }
 
 export async function* gatewayStream(
-  scene: SceneKey,
+  route: ModelRouteSnapshot,
   req: Omit<GatewayRequest, "model">,
   jobId?: string,
 ): AsyncGenerator<ImageStreamChunk> {
-  const [route] = await db
-    .select()
-    .from(modelSceneRoutes)
-    .where(eq(modelSceneRoutes.scene, scene));
-
-  if (!route?.providerId || !route.modelId) {
-    throw new GatewayError(
-      "capability_not_supported",
-      `场景 "${scene}" 尚未配置模型，请在设置页完成路由配置`
-    );
-  }
-
-  const [provider] = await db
-    .select()
-    .from(modelProviders)
-    .where(eq(modelProviders.id, route.providerId));
-
-  if (!provider?.isConfigured) {
-    throw new GatewayError(
-      "authentication_failed",
-      `供应商 "${provider?.name ?? route.providerId}" 未配置 API 密钥`
-    );
-  }
-
-  const adapter = buildAdapter(provider.name, provider.baseUrl, route.modelId);
-  const extraParams = route.parameters
-    ? (JSON.parse(route.parameters) as Record<string, unknown>)
-    : {};
+  const adapter = buildAdapter(route.provider, route.baseUrl, route.modelId);
 
   const fullReq: GatewayRequest = {
     ...req,
     model: route.modelId,
-    parameters: { ...extraParams, ...(req.parameters ?? {}) },
+    parameters: { ...route.parameters, ...(req.parameters ?? {}) },
   };
 
   if (adapter.sendStream) {
@@ -308,8 +228,9 @@ export async function* gatewayStream(
       await db.insert(modelCallLogs).values({
         id: randomUUID(),
         jobId: jobId ?? null,
-        scene,
-        provider: provider.name,
+        scene: route.scene,
+        modelRouteId: route.routeId,
+        provider: route.provider,
         model: route.billingModelId ?? route.modelId,
         status: "succeeded",
         errorType: null,
@@ -330,8 +251,9 @@ export async function* gatewayStream(
       await db.insert(modelCallLogs).values({
         id: randomUUID(),
         jobId: jobId ?? null,
-        scene,
-        provider: provider.name,
+        scene: route.scene,
+        modelRouteId: route.routeId,
+        provider: route.provider,
         model: route.billingModelId ?? route.modelId,
         status: "failed",
         errorType: ge?.type ?? "unknown",
@@ -351,7 +273,7 @@ export async function* gatewayStream(
     }
   } else {
     // Non-streaming fallback: single chunk on completion
-    const result = await gatewayCall(scene, req, jobId);
+    const result = await gatewayCall(route, req, jobId);
     if (result.image) {
       yield { b64: result.image, done: true };
     } else {

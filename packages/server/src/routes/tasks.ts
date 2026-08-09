@@ -21,12 +21,20 @@ import { randomUUID } from "node:crypto";
 import { enqueueJob } from "../jobs/worker.js";
 import { paths, assetPath } from "../lib/paths.js";
 import { gatewayStream, gatewayTextStream } from "../gateway/index.js";
+import { resolveDefaultModelRoute, resolveModelRoute, snapshotSelectedModelRoute } from "../gateway/model-route.js";
 import { renderDesignPlanPromptSnapshot, renderImageGenerationPromptSnapshot, validatePolishInstruction } from "../lib/prompt-service.js";
 import { saveImageAsset } from "../lib/storage.js";
 
 const execFileAsync = promisify(execFile);
 
 export const tasksRouter = new Hono();
+
+/** Normalize model JSON before persisting text columns; arrays are stored as JSON snapshots. */
+function textOrJsonArray(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return JSON.stringify(value.filter((item): item is string => typeof item === "string"));
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/tasks — cross-product task list (task center)
@@ -94,6 +102,7 @@ tasksRouter.post("/items/:itemId/inpaint", async (c) => {
     parentVersionId: string;
     maskDataUrl: string;
     instruction: string;
+    modelRouteId?: string;
   }>();
 
   if (!body.parentVersionId || !body.maskDataUrl || !body.instruction?.trim()) {
@@ -154,6 +163,7 @@ tasksRouter.post("/items/:itemId/inpaint", async (c) => {
       versionId,
       parentVersionId: body.parentVersionId,
       instruction: body.instruction.trim(),
+      modelRoute: await snapshotSelectedModelRoute("image_edit", body.modelRouteId),
     },
   });
 
@@ -189,6 +199,7 @@ tasksRouter.patch("/items/:itemId/versions/:versionId/select", async (c) => {
 // POST /api/tasks/items/:itemId/retry
 tasksRouter.post("/items/:itemId/retry", async (c) => {
   const itemId = c.req.param("itemId");
+  const body: { modelRouteId?: string } = await c.req.json<{ modelRouteId?: string }>().catch(() => ({}));
   const [item] = await db.select().from(imageItems).where(eq(imageItems.id, itemId));
   if (!item) return c.json({ error: "Not found" }, 404);
 
@@ -200,6 +211,7 @@ tasksRouter.post("/items/:itemId/retry", async (c) => {
   if (active) return c.json({ error: "该图片已有正在进行的生成任务" }, 409);
 
   const rendered = await renderImageGenerationPromptSnapshot({ imageItemId: itemId });
+  const modelRoute = await snapshotSelectedModelRoute("image_generation", body.modelRouteId);
   const [latestVersion] = await db.select({ id: imageVersions.id }).from(imageVersions)
     .where(eq(imageVersions.imageItemId, itemId)).limit(1);
   const jobId = await enqueueJob({
@@ -215,6 +227,7 @@ tasksRouter.post("/items/:itemId/retry", async (c) => {
       width: rendered.width,
       height: rendered.height,
       generationType: latestVersion ? "regeneration" : "initial",
+      ...(modelRoute ? { modelRoute } : {}),
     },
   });
 
@@ -230,10 +243,12 @@ tasksRouter.post("/items/:itemId/generate-stream", async (c) => {
     templateId?: string | null;
     editablePrompt?: string;
     polishInstruction?: string | null;
+    modelRouteId?: string;
   } = await c.req.json<{
     templateId?: string | null;
     editablePrompt?: string;
     polishInstruction?: string | null;
+    modelRouteId?: string;
   }>().catch(() => ({}));
 
   const [item] = await db.select().from(imageItems).where(eq(imageItems.id, itemId));
@@ -266,6 +281,12 @@ tasksRouter.post("/items/:itemId/generate-stream", async (c) => {
   const [existingVersion] = await db.select({ id: imageVersions.id }).from(imageVersions)
     .where(eq(imageVersions.imageItemId, itemId)).limit(1);
   const generationType = existingVersion ? "regeneration" as const : "initial" as const;
+  let selectedModelRoute;
+  try {
+    selectedModelRoute = body.modelRouteId ? await resolveModelRoute("image_generation", body.modelRouteId) : await resolveDefaultModelRoute("image_generation");
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
   const jobId = randomUUID();
   await db.insert(backgroundJobs).values({
     id: jobId,
@@ -282,6 +303,7 @@ tasksRouter.post("/items/:itemId/generate-stream", async (c) => {
       width: rendered.width,
       height: rendered.height,
       generationType,
+      modelRoute: selectedModelRoute,
     }),
     startedAt: new Date(),
     createdAt: new Date(),
@@ -292,7 +314,7 @@ tasksRouter.post("/items/:itemId/generate-stream", async (c) => {
       let lastB64 = "";
 
       // Stream progressive frames from the model, passing the product photo as reference
-      for await (const chunk of gatewayStream("image_generation", {
+      for await (const chunk of gatewayStream(selectedModelRoute, {
         scene: "image_generation",
         prompt: rendered.finalPrompt,
         ...(rendered.productImageBase64 ? { images: [rendered.productImageBase64] } : {}),
@@ -575,6 +597,8 @@ tasksRouter.post("/:taskId/generate-directions-stream", async (c) => {
     detailImageCount?: number;
     templateId?: string | null;
     editablePrompt?: string;
+    modelRouteId?: string;
+    productAnalysisRouteId?: string;
   } = await c.req.json<{
     userIdeas?: string;
     planCount?: number;
@@ -582,11 +606,21 @@ tasksRouter.post("/:taskId/generate-directions-stream", async (c) => {
     detailImageCount?: number;
     templateId?: string | null;
     editablePrompt?: string;
+    modelRouteId?: string;
+    productAnalysisRouteId?: string;
   }>().catch(() => ({}));
   const userIdeas = body.userIdeas ?? "";
   const planCount = Math.min(5, Math.max(2, Number(body.planCount ?? 3)));
-  const mainImageCount = Math.min(6, Math.max(1, Number(body.mainImageCount ?? 3)));
-  const detailImageCount = Math.min(6, Math.max(1, Number(body.detailImageCount ?? 3)));
+  const mainImageCount = Math.max(1, Math.floor(Number(body.mainImageCount ?? 3)) || 1);
+  const detailImageCount = Math.max(1, Math.floor(Number(body.detailImageCount ?? 3)) || 1);
+  let selectedModelRoute;
+  let selectedProductAnalysisRoute;
+  try {
+    selectedModelRoute = body.modelRouteId ? await resolveModelRoute("design_plan", body.modelRouteId) : await resolveDefaultModelRoute("design_plan");
+    selectedProductAnalysisRoute = body.productAnalysisRouteId ? await resolveModelRoute("competitor_image_analysis", body.productAnalysisRouteId) : await resolveDefaultModelRoute("competitor_image_analysis");
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
 
   return streamSSE(c, async (stream) => {
     const emit = async (event: Record<string, unknown>) => {
@@ -617,7 +651,7 @@ tasksRouter.post("/:taskId/generate-directions-stream", async (c) => {
       await emit({ type: "step", text: `正在分析商品图片（${rawAssets.length} 张）…` });
 
       const assets = await Promise.all(rawAssets.map(async (a, i) => {
-        const parsedAnalysis = await analyseAndPersistAsset(a);
+        const parsedAnalysis = await analyseAndPersistAsset(a, false, selectedProductAnalysisRoute);
         await emit({ type: "step", text: `商品图片 ${i + 1}/${rawAssets.length} 分析完成` });
         return { ...a, parsedAnalysis };
       }));
@@ -733,6 +767,8 @@ tasksRouter.post("/:taskId/generate-directions-stream", async (c) => {
           planCount,
           mainImageCount,
           detailImageCount,
+          modelRoute: selectedModelRoute,
+          productAnalysisRoute: selectedProductAnalysisRoute,
         }),
         startedAt: new Date(),
         createdAt: new Date(),
@@ -742,7 +778,7 @@ tasksRouter.post("/:taskId/generate-directions-stream", async (c) => {
       await emit({ type: "step", text: "正在生成设计方向，AI 思考中…" });
 
       let fullText = "";
-      for await (const chunk of gatewayTextStream("design_plan", {
+      for await (const chunk of gatewayTextStream(selectedModelRoute, {
         scene: "design_plan",
         prompt,
         systemPrompt: SYSTEM_PROMPT,
@@ -829,14 +865,22 @@ tasksRouter.post("/:taskId/generate-directions-stream", async (c) => {
 // POST /api/tasks/:taskId/generate-directions — enqueue design_plan job (kept for backward-compat)
 tasksRouter.post("/:taskId/generate-directions", async (c) => {
   const taskId = c.req.param("taskId");
+  const body: { modelRouteId?: string; productAnalysisRouteId?: string } = await c.req.json<{ modelRouteId?: string; productAnalysisRouteId?: string }>().catch(() => ({}));
   const [task] = await db.select().from(generationTasks).where(eq(generationTasks.id, taskId));
   if (!task) return c.json({ error: "Not found" }, 404);
 
+  const modelRoute = await snapshotSelectedModelRoute("design_plan", body.modelRouteId);
+  const productAnalysisRoute = await snapshotSelectedModelRoute("competitor_image_analysis", body.productAnalysisRouteId);
   const jobId = await enqueueJob({
     type: "design_plan",
     entityType: "generation_task",
     entityId: taskId,
-    inputSnapshot: { taskId, productId: task.productId },
+    inputSnapshot: {
+      taskId,
+      productId: task.productId,
+      ...(modelRoute ? { modelRoute } : {}),
+      ...(productAnalysisRoute ? { productAnalysisRoute } : {}),
+    },
   });
 
   await db
@@ -913,7 +957,7 @@ tasksRouter.post("/directions/:directionId/polish", async (c) => {
   if (await directionIsConfirmed(directionId)) {
     return c.json({ error: "该方向已被确认方案引用，不能修改" }, 409);
   }
-  const body = await c.req.json<{ instruction: string }>();
+  const body = await c.req.json<{ instruction: string; modelRouteId?: string }>();
   let instruction: string;
   try {
     instruction = validatePolishInstruction(body.instruction ?? "");
@@ -923,7 +967,7 @@ tasksRouter.post("/directions/:directionId/polish", async (c) => {
   if (!instruction) return c.json({ error: "请输入润色意见" }, 400);
   try {
     const { gatewayCall } = await import("../gateway/index.js");
-    const response = await gatewayCall("design_plan", {
+    const response = await gatewayCall(body.modelRouteId ? await resolveModelRoute("design_plan", body.modelRouteId) : await resolveDefaultModelRoute("design_plan"), {
       scene: "design_plan",
       systemPrompt: "你是电商视觉方案编辑。按用户意见修改方向，返回更新后的完整严格 JSON，不要输出 Markdown 或解释。必须保留 label、positioning、colorScheme、layoutIntent、copyStrategy、imageList 以及 imageList 内的全部字段。",
       prompt: `【当前方向】\n${direction.content}\n\n【修改意见】\n${instruction}`,
@@ -964,6 +1008,7 @@ tasksRouter.post("/directions/:directionId/chat", async (c) => {
   const body = await c.req.json<{
     message: string;
     history: Array<{ role: "user" | "assistant"; content: string }>;
+    modelRouteId?: string;
   }>();
 
   const [dir] = await db
@@ -994,7 +1039,7 @@ tasksRouter.post("/directions/:directionId/chat", async (c) => {
 
   let replyText = "";
   try {
-    const result = await gatewayCall("design_plan", {
+    const result = await gatewayCall(body.modelRouteId ? await resolveModelRoute("design_plan", body.modelRouteId) : await resolveDefaultModelRoute("design_plan"), {
       scene: "design_plan",
       systemPrompt,
       prompt,
@@ -1039,7 +1084,7 @@ tasksRouter.post("/:taskId/plan", async (c) => {
       angle?: string;
       background?: string;
       mood?: string;
-      visualElements?: string;
+      visualElements?: unknown;
       productAssetId?: string | null;
       presetId: string;
       promptTemplateId?: string | null;
@@ -1099,7 +1144,7 @@ tasksRouter.post("/:taskId/plan", async (c) => {
       angle: item.angle ?? null,
       background: item.background ?? null,
       mood: item.mood ?? null,
-      visualElements: item.visualElements ?? null,
+      visualElements: textOrJsonArray(item.visualElements),
       productAssetId: item.productAssetId ?? null,
       referenceAssetIds: null,
       promptTemplateId: item.promptTemplateId ?? null,
@@ -1131,7 +1176,7 @@ tasksRouter.post("/:taskId/plan", async (c) => {
 // POST /api/tasks/:taskId/generate — enqueue image_generation job for each item
 tasksRouter.post("/:taskId/generate", async (c) => {
   const taskId = c.req.param("taskId");
-  const body = await c.req.json<{ planVersionId: string }>();
+  const body = await c.req.json<{ planVersionId: string; modelRouteId?: string }>();
 
   const items = await db
     .select()
@@ -1181,6 +1226,7 @@ tasksRouter.post("/:taskId/generate", async (c) => {
         width: snapshot.width,
         height: snapshot.height,
         generationType: itemsWithVersions.has(item.id) ? "regeneration" : "initial",
+        modelRoute: await snapshotSelectedModelRoute("image_generation", body.modelRouteId),
       },
     });
     jobIds.push(jobId);

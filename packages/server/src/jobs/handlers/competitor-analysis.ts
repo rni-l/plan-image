@@ -9,12 +9,14 @@ import {
 import { eq } from "drizzle-orm";
 import { gatewayCall } from "../../gateway/index.js";
 import { readAndVerifyAsset } from "../../lib/storage.js";
+import { resolveDefaultModelRoute, type ModelRouteSnapshot } from "../../gateway/model-route.js";
 
 export interface CompetitorAnalysisInput {
   productId: string;
   analysisVersionId: string;
   competitorAssetId: string;
   cardId: string;
+  modelRoute: ModelRouteSnapshot;
 }
 
 /** Build system prompt with product context injected for better relevance */
@@ -76,12 +78,12 @@ export async function handleCompetitorImageAnalysis(
   const productName = product?.name ?? "";
 
   // Call vision model with product-aware prompts
-  const response = await gatewayCall("competitor_image_analysis", {
+  const response = await gatewayCall(input.modelRoute ?? await resolveDefaultModelRoute("competitor_image_analysis"), {
     scene: "competitor_image_analysis",
     prompt: buildUserPrompt(productName),
     systemPrompt: buildSystemPrompt(productName),
     images: [imageBase64],
-  });
+  }, jobId);
 
   // Parse model output
   let modelOutput: unknown;

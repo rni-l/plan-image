@@ -7,6 +7,7 @@ import { gatewayCall } from "../../gateway/index.js";
 import { saveImageAsset } from "../../lib/storage.js";
 import { assetPath } from "../../lib/paths.js";
 import { randomUUID } from "node:crypto";
+import { resolveDefaultModelRoute, type ModelRouteSnapshot } from "../../gateway/model-route.js";
 
 export interface ImageEditInput {
   /** The new placeholder imageVersion id — handler fills filePath/checksum here */
@@ -15,6 +16,7 @@ export interface ImageEditInput {
   parentVersionId: string;
   /** Natural-language edit instruction */
   instruction: string;
+  modelRoute: ModelRouteSnapshot;
 }
 
 /**
@@ -104,7 +106,7 @@ export async function handleImageEdit(
   // -------------------------------------------------------------------------
   // 6. Call gateway image_edit with wrapped prompt
   // -------------------------------------------------------------------------
-  const response = await gatewayCall("image_edit", {
+  const response = await gatewayCall(input.modelRoute ?? await resolveDefaultModelRoute("image_edit"), {
     scene: "image_edit",
     prompt: buildEditPrompt(input.instruction),
     images: [sourceB64],

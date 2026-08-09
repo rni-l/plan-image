@@ -5,6 +5,7 @@ import {
   modelSceneRoutes,
   outputPresets,
   promptTemplates,
+  type SceneKey,
   type PromptTemplateType,
 } from "../db/schema.js";
 import { and, asc, eq, isNull } from "drizzle-orm";
@@ -247,23 +248,67 @@ settingsRouter.put("/providers/:name", async (c) => {
 // Scene routes
 // ---------------------------------------------------------------------------
 
-settingsRouter.get("/routes", async (c) => {
-  const rows = await db.select().from(modelSceneRoutes);
-  const providers = await db.select().from(modelProviders);
-  const idToName = Object.fromEntries(providers.map((p) => [p.id, p.name]));
+const SCENE_KEYS: SceneKey[] = [
+  "competitor_image_analysis",
+  "competitor_synthesis",
+  "design_plan",
+  "image_generation",
+  "image_edit",
+];
 
-  // Enrich each route with the provider's human-readable name
-  return c.json(
-    rows.map((r) => ({
-      ...r,
-      providerName: r.providerId ? (idToName[r.providerId] ?? null) : null,
-    }))
-  );
+function isSceneKey(value: string): value is SceneKey {
+  return SCENE_KEYS.includes(value as SceneKey);
+}
+
+async function routeResponse(id: string) {
+  const rows = await db
+    .select({ route: modelSceneRoutes, providerName: modelProviders.name })
+    .from(modelSceneRoutes)
+    .leftJoin(modelProviders, eq(modelSceneRoutes.providerId, modelProviders.id))
+    .where(eq(modelSceneRoutes.id, id));
+  const row = rows[0];
+  return row ? { ...row.route, providerName: row.providerName ?? null } : undefined;
+}
+
+settingsRouter.get("/routes", async (c) => {
+  const requestedScene = c.req.query("scene");
+  if (requestedScene && !isSceneKey(requestedScene)) return c.json({ error: "无效场景" }, 400);
+  const rows = await db
+    .select({ route: modelSceneRoutes, providerName: modelProviders.name })
+    .from(modelSceneRoutes)
+    .leftJoin(modelProviders, eq(modelSceneRoutes.providerId, modelProviders.id))
+    .where(requestedScene ? eq(modelSceneRoutes.scene, requestedScene as SceneKey) : undefined)
+    .orderBy(asc(modelSceneRoutes.scene), asc(modelSceneRoutes.updatedAt));
+  return c.json(rows.map(({ route, providerName }) => ({ ...route, providerName: providerName ?? null })));
 });
 
-settingsRouter.put("/routes/:scene", async (c) => {
-  const scene = c.req.param("scene");
+async function resolveProvider(providerName: "bailian" | "volcengine" | "gpt_proxy", now: Date) {
+  let [provider] = await db.select().from(modelProviders).where(eq(modelProviders.name, providerName));
+  if (!provider) {
+    const id = randomUUID();
+    await db.insert(modelProviders).values({ id, name: providerName, isConfigured: false, keyHint: null, updatedAt: now });
+    [provider] = await db.select().from(modelProviders).where(eq(modelProviders.id, id));
+  }
+  return provider;
+}
+
+type RoutePayload = {
+  scene?: SceneKey;
+  providerName: "bailian" | "volcengine" | "gpt_proxy";
+  modelId: string;
+  billingModelId?: string | null;
+  parameters?: unknown;
+};
+
+function validateRoutePayload(body: RoutePayload): string | undefined {
+  if (!body.providerName || !["bailian", "volcengine", "gpt_proxy"].includes(body.providerName)) return "无效供应商";
+  if (!body.modelId?.trim()) return "模型 ID 不能为空";
+  if (body.parameters != null && (typeof body.parameters !== "object" || Array.isArray(body.parameters))) return "参数必须是 JSON 对象";
+}
+
+settingsRouter.post("/routes", async (c) => {
   const body = await c.req.json<{
+    scene: SceneKey;
     providerName: "bailian" | "volcengine" | "gpt_proxy";
     modelId: string;
     /**
@@ -275,64 +320,67 @@ settingsRouter.put("/routes/:scene", async (c) => {
     billingModelId?: string | null;
     parameters?: unknown;
   }>();
+  if (!isSceneKey(body.scene)) return c.json({ error: "无效场景" }, 400);
+  const validationError = validateRoutePayload(body);
+  if (validationError) return c.json({ error: validationError }, 400);
   const now = new Date();
-
-  // Find or lazily create the provider record (key may not be set yet)
-  let [provider] = await db
-    .select()
-    .from(modelProviders)
-    .where(eq(modelProviders.name, body.providerName));
-
-  if (!provider) {
-    const newId = randomUUID();
-    await db.insert(modelProviders).values({
-      id: newId,
-      name: body.providerName,
-      isConfigured: false,
-      keyHint: null,
-      updatedAt: now,
-    });
-    [provider] = await db
-      .select()
-      .from(modelProviders)
-      .where(eq(modelProviders.name, body.providerName));
-  }
-
+  const provider = await resolveProvider(body.providerName, now);
   if (!provider) return c.json({ error: "Failed to resolve provider" }, 500);
+  const existing = await db.select({ id: modelSceneRoutes.id }).from(modelSceneRoutes).where(eq(modelSceneRoutes.scene, body.scene));
+  const id = randomUUID();
+  await db.insert(modelSceneRoutes).values({
+    id, scene: body.scene, providerId: provider.id, modelId: body.modelId.trim(),
+    billingModelId: body.billingModelId?.trim() || null,
+    parameters: body.parameters ? JSON.stringify(body.parameters) : null,
+    isDefault: existing.length === 0,
+    updatedAt: now,
+  });
+  return c.json(await routeResponse(id), 201);
+});
 
-  const existing = await db
-    .select()
-    .from(modelSceneRoutes)
-    .where(eq(modelSceneRoutes.scene, scene as import("../db/schema.js").SceneKey));
+settingsRouter.patch("/routes/:id", async (c) => {
+  const id = c.req.param("id");
+  const [existing] = await db.select().from(modelSceneRoutes).where(eq(modelSceneRoutes.id, id));
+  if (!existing) return c.json({ error: "路由不存在" }, 404);
+  const body = await c.req.json<RoutePayload>();
+  const validationError = validateRoutePayload(body);
+  if (validationError) return c.json({ error: validationError }, 400);
+  const now = new Date();
+  const provider = await resolveProvider(body.providerName, now);
+  if (!provider) return c.json({ error: "Failed to resolve provider" }, 500);
+  await db.update(modelSceneRoutes).set({
+    providerId: provider.id, modelId: body.modelId.trim(), billingModelId: body.billingModelId?.trim() || null,
+    parameters: body.parameters ? JSON.stringify(body.parameters) : null, updatedAt: now,
+  }).where(eq(modelSceneRoutes.id, id));
+  return c.json(await routeResponse(id));
+});
 
-  if (existing.length > 0) {
-    await db
-      .update(modelSceneRoutes)
-      .set({
-        providerId: provider.id,
-        modelId: body.modelId,
-        billingModelId: body.billingModelId ?? null,
-        parameters: body.parameters ? JSON.stringify(body.parameters) : null,
-        updatedAt: now,
-      })
-      .where(eq(modelSceneRoutes.scene, scene as import("../db/schema.js").SceneKey));
-  } else {
-    await db.insert(modelSceneRoutes).values({
-      id: randomUUID(),
-      scene: scene as import("../db/schema.js").SceneKey,
-      providerId: provider.id,
-      modelId: body.modelId,
-      billingModelId: body.billingModelId ?? null,
-      parameters: body.parameters ? JSON.stringify(body.parameters) : null,
-      updatedAt: now,
-    });
-  }
+settingsRouter.post("/routes/:id/default", async (c) => {
+  const id = c.req.param("id");
+  const [route] = await db.select().from(modelSceneRoutes).where(eq(modelSceneRoutes.id, id));
+  if (!route) return c.json({ error: "路由不存在" }, 404);
+  const now = new Date();
+  db.transaction((tx) => {
+    tx.update(modelSceneRoutes).set({ isDefault: false, updatedAt: now }).where(eq(modelSceneRoutes.scene, route.scene)).run();
+    tx.update(modelSceneRoutes).set({ isDefault: true, updatedAt: now }).where(eq(modelSceneRoutes.id, id)).run();
+  });
+  return c.json(await routeResponse(id));
+});
 
-  const [row] = await db
-    .select()
-    .from(modelSceneRoutes)
-    .where(eq(modelSceneRoutes.scene, scene as import("../db/schema.js").SceneKey));
-  return c.json({ ...row, providerName: body.providerName });
+settingsRouter.delete("/routes/:id", async (c) => {
+  const id = c.req.param("id");
+  const [route] = await db.select().from(modelSceneRoutes).where(eq(modelSceneRoutes.id, id));
+  if (!route) return c.json({ error: "路由不存在" }, 404);
+  const routes = await db.select({ id: modelSceneRoutes.id }).from(modelSceneRoutes).where(eq(modelSceneRoutes.scene, route.scene));
+  if (route.isDefault && routes.length === 1) return c.json({ error: "每个场景至少保留一个默认模型" }, 409);
+  db.transaction((tx) => {
+    if (route.isDefault) {
+      const replacement = routes.find((candidate) => candidate.id !== id);
+      if (replacement) tx.update(modelSceneRoutes).set({ isDefault: true, updatedAt: new Date() }).where(eq(modelSceneRoutes.id, replacement.id)).run();
+    }
+    tx.delete(modelSceneRoutes).where(eq(modelSceneRoutes.id, id)).run();
+  });
+  return c.body(null, 204);
 });
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { saveImageAsset, UploadError } from "../lib/storage.js";
 import { gatewayCall } from "../gateway/index.js";
+import { resolveDefaultModelRoute, resolveModelRoute } from "../gateway/model-route.js";
 
 export const productsRouter = new Hono();
 
@@ -239,14 +240,14 @@ productsRouter.patch("/:id/assets/reorder", async (c) => {
 // POST /api/products/:id/assets/:assetId/analyse — trigger vision analysis for one asset
 productsRouter.post("/:id/assets/:assetId/analyse", async (c) => {
   const assetId = c.req.param("assetId");
-  const body = (await c.req.json<{ force?: boolean }>().catch(() => null)) ?? {};
+  const body = (await c.req.json<{ force?: boolean; modelRouteId?: string }>().catch(() => null)) ?? {};
   const force = "force" in body ? (body.force ?? false) : false;
 
   const [asset] = await db.select().from(productAssets).where(eq(productAssets.id, assetId));
   if (!asset) return c.json({ error: "Not found" }, 404);
 
   const { analyseAndPersistAsset } = await import("../lib/product-analysis.js");
-  const result = await analyseAndPersistAsset(asset, force);
+  const result = await analyseAndPersistAsset(asset, force, body.modelRouteId ? await resolveModelRoute("competitor_image_analysis", body.modelRouteId) : undefined);
 
   if (!result) {
     return c.json({ error: "图片分析失败，请检查视觉模型配置" }, 502);
@@ -398,6 +399,7 @@ productsRouter.post("/:id/tasks", async (c) => {
 
 const extractInfoSchema = z.object({
   rawText: z.string().min(1).max(20000),
+  modelRouteId: z.string().min(1).optional(),
 });
 
 // POST /api/products/:id/extract-info
@@ -406,7 +408,7 @@ productsRouter.post("/:id/extract-info", zValidator("json", extractInfoSchema), 
   const [product] = await db.select().from(products).where(eq(products.id, productId));
   if (!product) return c.json({ error: "Not found" }, 404);
 
-  const { rawText } = c.req.valid("json");
+  const { rawText, modelRouteId } = c.req.valid("json");
 
   const systemPrompt = `你是商品信息提取助手。从用户提供的原始文本中提取商品规格参数、核心卖点和备注，以JSON格式返回。
 
@@ -424,7 +426,7 @@ productsRouter.post("/:id/extract-info", zValidator("json", extractInfoSchema), 
 
   let result;
   try {
-    result = await gatewayCall("competitor_synthesis", {
+    result = await gatewayCall(modelRouteId ? await resolveModelRoute("competitor_synthesis", modelRouteId) : await resolveDefaultModelRoute("competitor_synthesis"), {
       scene: "competitor_synthesis",
       prompt: rawText,
       systemPrompt,

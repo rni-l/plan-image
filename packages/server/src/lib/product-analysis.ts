@@ -8,6 +8,7 @@ import { productAssets } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import { gatewayCall } from "../gateway/index.js";
 import { assetPath } from "./paths.js";
+import { resolveDefaultModelRoute, type ModelRouteSnapshot } from "../gateway/model-route.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -51,7 +52,8 @@ const USER_PROMPT = `请对这张商品图片进行全面的视觉分析，输�
  * the model returns an unparseable response.
  */
 export async function analyseProductImage(
-  filePath: string
+  filePath: string,
+  modelRoute?: ModelRouteSnapshot,
 ): Promise<ProductImageAnalysis | null> {
   const absolutePath = assetPath(filePath);
   let imageB64: string;
@@ -63,7 +65,7 @@ export async function analyseProductImage(
   }
 
   try {
-    const response = await gatewayCall("competitor_image_analysis", {
+    const response = await gatewayCall(modelRoute ?? await resolveDefaultModelRoute("competitor_image_analysis"), {
       scene: "competitor_image_analysis",
       prompt: USER_PROMPT,
       systemPrompt: SYSTEM_PROMPT,
@@ -87,7 +89,8 @@ export async function analyseProductImage(
  */
 export async function analyseAndPersistAsset(
   asset: typeof productAssets.$inferSelect,
-  force = false
+  force = false,
+  modelRoute?: ModelRouteSnapshot,
 ): Promise<ProductImageAnalysis | null> {
   // Return cached result unless forced
   if (!force && asset.analysis) {
@@ -96,7 +99,7 @@ export async function analyseAndPersistAsset(
     } catch { /* fall through to re-analyse */ }
   }
 
-  const result = await analyseProductImage(asset.filePath);
+  const result = await analyseProductImage(asset.filePath, modelRoute);
   if (result) {
     await db
       .update(productAssets)

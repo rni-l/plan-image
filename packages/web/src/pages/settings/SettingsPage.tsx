@@ -28,6 +28,9 @@ interface SceneRoute {
   providerId: string | null;
   modelId: string | null;
   parameters: string | null;
+  billingModelId: string | null;
+  isDefault: boolean;
+  providerName?: Provider["name"] | null;
   updatedAt: number;
 }
 
@@ -61,7 +64,6 @@ const SECTIONS = [
   { to: "/settings/models",  label: "模型供应商" },
   { to: "/settings/routing", label: "场景路由" },
   { to: "/settings/presets", label: "输出预设" },
-  { to: "/settings/prompts", label: "Prompt 管理" },
 ] as const;
 
 export function SettingsPage() {
@@ -94,7 +96,6 @@ export function SettingsPage() {
         {section === "models"  && <ModelsSection />}
         {section === "routing" && <RoutingSection />}
         {section === "presets" && <PresetsSection />}
-        {section === "prompts" && <PromptTemplatesSection />}
       </div>
     </div>
   );
@@ -266,125 +267,34 @@ const PROVIDER_OPTIONS = [
 
 type ProviderName = (typeof PROVIDER_OPTIONS)[number]["name"];
 
-type RowState = {
-  providerName: ProviderName | "";
-  modelId: string;
-  dirty: boolean;
-  saving: boolean;
-};
-
 function RoutingSection() {
   const sceneOrder = Object.keys(SCENE_LABELS);
-  const [rows, setRows] = useState<Record<string, RowState>>(() =>
-    Object.fromEntries(
-      sceneOrder.map((s) => [s, { providerName: "", modelId: "", dirty: false, saving: false }])
-    )
-  );
-
-  useEffect(() => {
-    api
-      .get<Array<{ scene: string; providerName: string | null; modelId: string | null }>>(
-        "/settings/routes"
-      )
-      .then((routes) => {
-        setRows((prev) => {
-          const next = { ...prev };
-          for (const r of routes) {
-            next[r.scene] = {
-              providerName: (r.providerName ?? "") as ProviderName | "",
-              modelId: r.modelId ?? "",
-              dirty: false,
-              saving: false,
-            };
-          }
-          return next;
-        });
-      })
-      .catch(() => toast.error("加载场景路由失败"));
-  }, []);
-
-  function update(scene: string, field: "providerName" | "modelId", value: string) {
-    setRows((prev) => ({
-      ...prev,
-      [scene]: { ...prev[scene]!, [field]: value, dirty: true },
-    }));
-  }
-
-  async function save(scene: string) {
-    const row = rows[scene];
-    if (!row?.providerName || !row.modelId.trim()) {
-      toast.error("请选择供应商并填写模型 ID");
-      return;
-    }
-    setRows((prev) => ({ ...prev, [scene]: { ...prev[scene]!, saving: true } }));
+  const [routes, setRoutes] = useState<SceneRoute[]>([]);
+  const [adding, setAdding] = useState<string | null>(null);
+  const [draft, setDraft] = useState({ providerName: "bailian" as ProviderName, modelId: "", billingModelId: "", parameters: "{}" });
+  const load = () => api.get<SceneRoute[]>("/settings/routes").then(setRoutes).catch(() => toast.error("加载场景路由失败"));
+  useEffect(() => { load(); }, []);
+  async function create(scene: string) {
     try {
-      await api.put(`/settings/routes/${scene}`, {
-        providerName: row.providerName,
-        modelId: row.modelId.trim(),
-      });
-      setRows((prev) => ({ ...prev, [scene]: { ...prev[scene]!, dirty: false, saving: false } }));
-      toast.success("已保存");
-    } catch {
-      toast.error("保存失败");
-      setRows((prev) => ({ ...prev, [scene]: { ...prev[scene]!, saving: false } }));
-    }
+      await api.post("/settings/routes", { scene, providerName: draft.providerName, modelId: draft.modelId, billingModelId: draft.billingModelId || null, parameters: JSON.parse(draft.parameters || "{}") });
+      setAdding(null); setDraft({ providerName: "bailian", modelId: "", billingModelId: "", parameters: "{}" }); load();
+    } catch { toast.error("新增失败，请检查模型 ID 与 JSON 参数"); }
   }
+  async function makeDefault(id: string) { await api.post(`/settings/routes/${id}/default`, {}); load(); }
+  async function remove(id: string) { try { await api.delete(`/settings/routes/${id}`); load(); } catch { toast.error("默认模型需要先指定替代项"); } }
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-4xl">
       <h2 className="section-title mb-1 text-base text-zinc-900">场景路由</h2>
       <p className="mb-6 text-sm text-zinc-500">
-        每个场景独立配置模型，修改不影响已提交的任务。
+        每个场景可配置多个模型；带“默认”标记的模型会在操作面板中预选。提交后任务会冻结本次路由。
       </p>
 
-      <div className="overflow-hidden rounded-lg border border-zinc-200">
-        {sceneOrder.map((scene, i) => {
-          const row = rows[scene] ?? { providerName: "", modelId: "", dirty: false, saving: false };
-          const canSave = row.dirty && !!row.providerName && !!row.modelId.trim();
-          return (
-            <div
-              key={scene}
-              className={`flex items-center gap-3 px-4 py-3 ${i > 0 ? "border-t border-zinc-100" : ""}`}
-            >
-              <span className="w-32 shrink-0 text-sm text-zinc-700">
-                {SCENE_LABELS[scene]}
-              </span>
-
-              {/* Provider — always shows all 3 options */}
-              <select
-                className="h-8 w-36 shrink-0 rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900"
-                value={row.providerName}
-                onChange={(e) => update(scene, "providerName", e.target.value)}
-              >
-                <option value="">— 供应商 —</option>
-                {PROVIDER_OPTIONS.map((p) => (
-                  <option key={p.name} value={p.name}>{p.label}</option>
-                ))}
-              </select>
-
-              {/* Model ID */}
-              <Input
-                className="flex-1"
-                placeholder="模型 ID，如 qwen-vl-max"
-                value={row.modelId}
-                onChange={(e) => update(scene, "modelId", e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && canSave && save(scene)}
-              />
-
-              {/* Save button */}
-              <Button
-                size="sm"
-                variant={canSave ? "default" : "ghost"}
-                disabled={!canSave || row.saving}
-                onClick={() => save(scene)}
-                className="w-14 shrink-0"
-              >
-                {row.saving ? "…" : "保存"}
-              </Button>
-            </div>
-          );
-        })}
-      </div>
+      <div className="space-y-3">{sceneOrder.map((scene) => <section key={scene} className="rounded-lg border border-zinc-200">
+        <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-4 py-2"><span className="text-sm font-medium">{SCENE_LABELS[scene]}</span><Button size="sm" variant="outline" onClick={() => setAdding(scene)}><Plus size={13} /> 新增模型</Button></div>
+        {routes.filter((route) => route.scene === scene).map((route) => <div key={route.id} className="flex items-center gap-3 px-4 py-2 text-sm"><span className="w-28 text-zinc-600">{route.providerName ?? "未配置"}</span><code className="flex-1 truncate text-xs">{route.modelId ?? "未配置"}</code>{route.billingModelId && <span className="text-xs text-zinc-400">计费：{route.billingModelId}</span>}{route.isDefault ? <Badge>默认</Badge> : <Button size="sm" variant="ghost" onClick={() => makeDefault(route.id)}>设默认</Button>}<button className="text-zinc-400 hover:text-red-600" onClick={() => remove(route.id)}><Trash2 size={14} /></button></div>)}
+        {adding === scene && <div className="grid gap-2 border-t border-zinc-100 p-3 md:grid-cols-[150px_1fr_1fr_auto]"><select className="h-9 rounded border border-zinc-200 px-2 text-sm" value={draft.providerName} onChange={(e) => setDraft({ ...draft, providerName: e.target.value as ProviderName })}>{PROVIDER_OPTIONS.map((p) => <option key={p.name} value={p.name}>{p.label}</option>)}</select><Input placeholder="模型 ID" value={draft.modelId} onChange={(e) => setDraft({ ...draft, modelId: e.target.value })} /><Input placeholder="计费模型 ID（可选）" value={draft.billingModelId} onChange={(e) => setDraft({ ...draft, billingModelId: e.target.value })} /><Button size="sm" disabled={!draft.modelId.trim()} onClick={() => create(scene)}>保存</Button></div>}
+      </section>)}</div>
     </div>
   );
 }
@@ -424,7 +334,7 @@ const SAMPLE_CONTEXT: Record<string, string | number> = {
   reference_asset_ids: "", width: 1000, height: 1000, aspect_ratio: "1:1",
 };
 
-function PromptTemplatesSection() {
+export function PromptTemplatesSection() {
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ type: PromptTemplate["type"]; name: string; description: string; body: string }>({

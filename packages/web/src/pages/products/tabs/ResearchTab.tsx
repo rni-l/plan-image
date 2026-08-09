@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Sheet } from "@/components/ui/sheet";
+import { ModelRouteSelect } from "@/components/model-route-select";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogClose,
 } from "@/components/ui/dialog";
@@ -63,6 +64,8 @@ export function ResearchTab({ productId }: { productId: string }) {
   const [sheetOpen, setSheetOpen]   = useState(false);
   const [analyzing, setAnalyzing]   = useState(false);
   const [synthesizing, setSynthesizing] = useState(false);
+  const [analysisModelRouteId, setAnalysisModelRouteId] = useState("");
+  const [synthesisModelRouteId, setSynthesisModelRouteId] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Load assets + versions ──────────────────────────────────────────────
@@ -122,7 +125,7 @@ export function ResearchTab({ productId }: { productId: string }) {
     setAnalyzing(true);
     try {
       const res = await api.post<{ version: AnalysisVersion; jobIds: string[] }>(
-        `/research/${productId}/analyze`, {}
+        `/research/${productId}/analyze`, { ...(analysisModelRouteId ? { modelRouteId: analysisModelRouteId } : {}) }
       );
       const newVersion = res.version;
       setVersions((prev) => [newVersion, ...prev]);
@@ -142,7 +145,7 @@ export function ResearchTab({ productId }: { productId: string }) {
     if (!selectedId) return;
     setSynthesizing(true);
     try {
-      await api.post(`/research/versions/${selectedId}/synthesize`, {});
+      await api.post(`/research/versions/${selectedId}/synthesize`, { ...(synthesisModelRouteId ? { modelRouteId: synthesisModelRouteId } : {}) });
       toast.success("综合报告生成任务已提交");
       startPolling(selectedId);
     } catch {
@@ -162,7 +165,7 @@ export function ResearchTab({ productId }: { productId: string }) {
   return (
     <div className="flex h-full flex-col">
       {/* Top bar */}
-      <div className="flex items-center gap-3 border-b border-zinc-100 px-8 py-3">
+      <div className="flex flex-wrap items-center gap-3 border-b border-zinc-100 px-8 py-3">
         {/* Version selector */}
         <select
           className="h-8 rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-900"
@@ -178,7 +181,16 @@ export function ResearchTab({ productId }: { productId: string }) {
           }
         </select>
 
-        <div className="flex-1" />
+        <div className="min-w-4 flex-1" />
+
+        <label className="flex min-w-52 flex-col gap-1 text-xs text-zinc-500">
+          逐图分析模型
+          <ModelRouteSelect scene="competitor_image_analysis" value={analysisModelRouteId} onChange={setAnalysisModelRouteId} className="w-full" />
+        </label>
+        <label className="flex min-w-52 flex-col gap-1 text-xs text-zinc-500">
+          综合报告模型
+          <ModelRouteSelect scene="competitor_synthesis" value={synthesisModelRouteId} onChange={setSynthesisModelRouteId} className="w-full" />
+        </label>
 
         <Button variant="outline" size="sm" onClick={() => setSheetOpen(true)}>
           <Upload size={14} /> 管理素材 ({assets.length})

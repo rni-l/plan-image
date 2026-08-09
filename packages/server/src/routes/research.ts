@@ -9,6 +9,7 @@ import {
 import { eq, desc, max } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { enqueueJob } from "../jobs/worker.js";
+import { snapshotSelectedModelRoute } from "../gateway/model-route.js";
 
 export const researchRouter = new Hono();
 
@@ -38,6 +39,13 @@ researchRouter.get("/:productId/versions", async (c) => {
 // Creates a new analysis version and enqueues one job per competitor asset
 researchRouter.post("/:productId/analyze", async (c) => {
   const productId = c.req.param("productId");
+  const body: { modelRouteId?: string } = await c.req.json<{ modelRouteId?: string }>().catch(() => ({}));
+  let modelRoute;
+  try {
+    modelRoute = await snapshotSelectedModelRoute("competitor_image_analysis", body.modelRouteId);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
 
   const assets = await db
     .select()
@@ -90,6 +98,7 @@ researchRouter.post("/:productId/analyze", async (c) => {
         analysisVersionId: versionId,
         competitorAssetId: asset.id,
         cardId,
+        ...(modelRoute ? { modelRoute } : {}),
       },
     });
     jobIds.push(jobId);
@@ -106,6 +115,13 @@ researchRouter.post("/:productId/analyze", async (c) => {
 // POST /api/research/versions/:versionId/synthesize
 researchRouter.post("/versions/:versionId/synthesize", async (c) => {
   const versionId = c.req.param("versionId");
+  const body: { modelRouteId?: string } = await c.req.json<{ modelRouteId?: string }>().catch(() => ({}));
+  let modelRoute;
+  try {
+    modelRoute = await snapshotSelectedModelRoute("competitor_synthesis", body.modelRouteId);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
 
   const [version] = await db
     .select()
@@ -120,6 +136,7 @@ researchRouter.post("/versions/:versionId/synthesize", async (c) => {
     inputSnapshot: {
       productId: version.productId,
       analysisVersionId: versionId,
+      ...(modelRoute ? { modelRoute } : {}),
     },
   });
 

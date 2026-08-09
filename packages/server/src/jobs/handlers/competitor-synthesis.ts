@@ -9,10 +9,12 @@ import {
 import { eq } from "drizzle-orm";
 import { gatewayCall } from "../../gateway/index.js";
 import { randomUUID } from "node:crypto";
+import { resolveDefaultModelRoute, type ModelRouteSnapshot } from "../../gateway/model-route.js";
 
 export interface CompetitorSynthesisInput {
   productId: string;
   analysisVersionId: string;
+  modelRoute: ModelRouteSnapshot;
 }
 
 const SYSTEM_PROMPT = `你是一位顶级的电商视觉策略顾问，擅长从多张竞品图中提炼行业规律、识别差异化机会，并给出可直接指导成图的设计建议。
@@ -93,11 +95,11 @@ ${effectiveCards.map((c, i) => `第${i + 1}张：${JSON.stringify(c)}`).join("\n
 }
 只输出JSON。`;
 
-  const response = await gatewayCall("competitor_synthesis", {
+  const response = await gatewayCall(input.modelRoute ?? await resolveDefaultModelRoute("competitor_synthesis"), {
     scene: "competitor_synthesis",
     prompt,
     systemPrompt: SYSTEM_PROMPT,
-  });
+  }, jobId);
 
   let content: unknown;
   try {

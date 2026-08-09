@@ -187,3 +187,23 @@ test("persists the draft direction selection and protects confirmed directions",
   assert.equal(updated.label, "更新方向");
   assert.equal((JSON.parse(updated.content) as { positioning: string }).positioning, "新");
 });
+
+test("confirms a plan when model visual elements are returned as an array", async () => {
+  const response = await app.request("/tasks/task-1/plan", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      directionId: "direction-1",
+      imageTemplateId: "builtin-image-commerce",
+      items: [{
+        listType: "detail_page",
+        title: "结构说明",
+        presetId: "missing-preset",
+        visualElements: ["产品", "尺寸标注", "蓝图网格"],
+      }],
+    }),
+  });
+  assert.equal(response.status, 201);
+  const body = await response.json() as { items: Array<{ visualElements: string | null }> };
+  assert.equal(body.items[0]?.visualElements, JSON.stringify(["产品", "尺寸标注", "蓝图网格"]));
+});

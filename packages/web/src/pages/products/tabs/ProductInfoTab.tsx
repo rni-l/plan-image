@@ -31,6 +31,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ImageLightbox } from "@/components/ui/image-lightbox";
+import { ModelRouteSelect } from "@/components/model-route-select";
 import {
   Dialog,
   DialogContent,
@@ -117,6 +118,7 @@ export function ProductInfoTab({
   const [extracting, setExtracting] = useState(false);
   const [extracted, setExtracted] = useState<ExtractResult | null>(null);
   const [extractError, setExtractError] = useState<string | null>(null);
+  const [extractModelRouteId, setExtractModelRouteId] = useState("");
 
   // Track whether form is dirty
   const initial = useRef({ name: "", notes: "", specs: "[]", points: "[]" });
@@ -240,7 +242,7 @@ export function ProductInfoTab({
     setExtracted(null);
     setExtractError(null);
     try {
-      const result = await api.post<ExtractResult>(`/products/${productId}/extract-info`, { rawText: extractRaw });
+      const result = await api.post<ExtractResult>(`/products/${productId}/extract-info`, { rawText: extractRaw, ...(extractModelRouteId ? { modelRouteId: extractModelRouteId } : {}) });
       setExtracted(result);
     } catch {
       setExtractError("提取失败，请检查模型配置或稍后重试");
@@ -386,6 +388,8 @@ export function ProductInfoTab({
         onExtract={handleExtract}
         onApply={handleApplyExtract}
         onReset={() => { setExtracted(null); setExtractError(null); }}
+        modelRouteId={extractModelRouteId}
+        onModelRouteChange={setExtractModelRouteId}
       />
     </div>
   );
@@ -526,7 +530,7 @@ function UploadCard({ uploading, onFiles }: { uploading: boolean; onFiles: (file
 
 function TextExtractDialog({
   open, onOpenChange, rawText, onRawTextChange, extracting,
-  extracted, extractError, onExtract, onApply, onReset,
+  extracted, extractError, onExtract, onApply, onReset, modelRouteId, onModelRouteChange,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -538,6 +542,8 @@ function TextExtractDialog({
   onExtract: () => void;
   onApply: () => void;
   onReset: () => void;
+  modelRouteId: string;
+  onModelRouteChange: (id: string) => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -555,6 +561,7 @@ function TextExtractDialog({
             </p>
             <Textarea rows={8} placeholder="粘贴原始文字内容…" value={rawText}
               onChange={(e) => onRawTextChange(e.target.value)} disabled={extracting} />
+            <ModelRouteSelect scene="competitor_synthesis" value={modelRouteId} onChange={onModelRouteChange} className="w-full" />
             {extractError && <p className="text-xs text-red-500">{extractError}</p>}
           </div>
         )}

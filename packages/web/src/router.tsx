@@ -7,6 +7,7 @@ import { TaskCenterPage } from "./pages/task-center/TaskCenterPage.js";
 import { SettingsPage } from "./pages/settings/SettingsPage.js";
 import { LogsPage } from "./pages/logs/LogsPage.js";
 import { BillingPage } from "./pages/billing/BillingPage.js";
+import { PromptTemplatesPage } from "./pages/prompts/PromptTemplatesPage.js";
 
 export const router = createBrowserRouter([
   {
@@ -35,6 +36,7 @@ export const router = createBrowserRouter([
       // Logs & Billing
       { path: "logs", element: <LogsPage /> },
       { path: "billing", element: <BillingPage /> },
+      { path: "prompts", element: <PromptTemplatesPage /> },
 
       // Settings
       { path: "settings", element: <Navigate to="/settings/models" replace /> },

@@ -23,6 +23,7 @@ interface ApiRequestLog {
 interface LlmCallLog {
   id: string;
   jobId: string | null;
+  modelRouteId: string | null;
   scene: string;
   provider: string;
   model: string;
@@ -318,6 +319,7 @@ function LlmCallsTab() {
               <th className="px-3 py-2 text-left font-medium">场景</th>
               <th className="px-3 py-2 text-left font-medium">供应商</th>
               <th className="px-3 py-2 text-left font-medium">模型</th>
+              <th className="px-3 py-2 text-left font-medium">路由</th>
               <th className="px-3 py-2 text-left font-medium">状态</th>
               <th className="px-3 py-2 text-right font-medium">耗时</th>
               <th className="px-3 py-2 text-right font-medium">输入Token</th>
@@ -326,7 +328,7 @@ function LlmCallsTab() {
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={9} className="px-3 py-8 text-center text-xs text-zinc-400">暂无数据</td></tr>
+              <tr><td colSpan={10} className="px-3 py-8 text-center text-xs text-zinc-400">暂无数据</td></tr>
             )}
             {rows.map((r) => (
               <>
@@ -344,6 +346,7 @@ function LlmCallsTab() {
                   <td className="px-3 py-2 text-xs">{SCENE_LABELS[r.scene] ?? r.scene}</td>
                   <td className="px-3 py-2 text-xs">{PROVIDER_LABELS[r.provider] ?? r.provider}</td>
                   <td className="px-3 py-2 font-mono text-xs text-zinc-700 max-w-[160px] truncate">{r.model}</td>
+                  <td className="px-3 py-2 font-mono text-[10px] text-zinc-500">{r.modelRouteId?.slice(0, 8) ?? "历史"}</td>
                   <td className="px-3 py-2">
                     <Badge variant={r.status === "succeeded" ? "succeeded" : "failed"} className="text-xs px-1.5 py-0">
                       {r.status === "succeeded" ? "成功" : "失败"}
@@ -355,7 +358,7 @@ function LlmCallsTab() {
                 </tr>
                 {expandedId === r.id && (
                   <tr key={`${r.id}-detail`} className="bg-zinc-50 border-b">
-                    <td colSpan={9} className="px-4 py-3">
+                    <td colSpan={10} className="px-4 py-3">
                       <div className="grid grid-cols-2 gap-3 text-xs">
                         <div className="flex flex-col gap-2">
                           <div>

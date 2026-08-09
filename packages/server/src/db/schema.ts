@@ -312,7 +312,7 @@ export const modelProviders = sqliteTable("model_providers", {
 
 export const modelSceneRoutes = sqliteTable("model_scene_routes", {
   id: text("id").primaryKey(),
-  scene: text("scene").$type<SceneKey>().notNull().unique(),
+  scene: text("scene").$type<SceneKey>().notNull(),
   providerId: text("provider_id").references(() => modelProviders.id),
   /** Model ID passed to the API request (e.g. endpoint ID or canonical model name) */
   modelId: text("model_id"),
@@ -325,6 +325,8 @@ export const modelSceneRoutes = sqliteTable("model_scene_routes", {
   billingModelId: text("billing_model_id"),
   /** JSON object of extra model parameters */
   parameters: text("parameters"),
+  /** Exactly one route per scene is the UI default. */
+  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });
 
@@ -347,6 +349,8 @@ export const modelCallLogs = sqliteTable("model_call_logs", {
   id: text("id").primaryKey(),
   jobId: text("job_id").references(() => backgroundJobs.id),
   scene: text("scene").notNull(),
+  /** Frozen route used for this call; null only for pre-route-history logs. */
+  modelRouteId: text("model_route_id").references(() => modelSceneRoutes.id),
   provider: text("provider").notNull(),
   model: text("model").notNull(),
   status: text("status").notNull(), // 'succeeded' | 'failed'

@@ -134,6 +134,7 @@ export async function seedDefaults(): Promise<void> {
         providerId: null,
         modelId: null,
         parameters: null,
+        isDefault: true,
         updatedAt: now,
       });
     }

@@ -3,6 +3,7 @@ import { and, asc, eq, isNull } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { promptTemplates, type PromptTemplateType } from "../db/schema.js";
 import { gatewayCall } from "../gateway/index.js";
+import { resolveDefaultModelRoute, resolveModelRoute } from "../gateway/model-route.js";
 import {
   DESIGN_PLAN_LOCKED_SUFFIX,
   IMAGE_GENERATION_LOCKED_SUFFIX,
@@ -123,6 +124,7 @@ promptsRouter.post("/polish", async (c) => {
     type: string;
     editablePrompt: string;
     instruction: string;
+    modelRouteId?: string;
   }>();
   if (!isType(body.type)) return c.json({ error: "无效的 Prompt 类型" }, 400);
   let instruction: string;
@@ -135,7 +137,7 @@ promptsRouter.post("/polish", async (c) => {
   if (!instruction) return c.json({ error: "请输入润色意见" }, 400);
 
   try {
-    const response = await gatewayCall("design_plan", {
+    const response = await gatewayCall(body.modelRouteId ? await resolveModelRoute("design_plan", body.modelRouteId) : await resolveDefaultModelRoute("design_plan"), {
       scene: "design_plan",
       systemPrompt: "你是 Prompt 编辑专家。根据用户意见润色可编辑 Prompt 正文。只输出完整的润色后正文，不要输出解释、Markdown 或固定契约；不得删减用户明确提供的事实。",
       prompt: `【当前可编辑 Prompt】\n${body.editablePrompt}\n\n【润色意见】\n${instruction}`,

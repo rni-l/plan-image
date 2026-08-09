@@ -16,7 +16,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { shouldGenerateDirections } from "@/lib/task-wizard-state";
+import { normalizeStringArray, shouldGenerateDirections } from "@/lib/task-wizard-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -703,7 +703,7 @@ function Step3({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
             listType: it.listType,
             title: it.title,
             description: it.description || undefined,
-            sellingPoints: it.sellingPoints?.filter(Boolean),
+            sellingPoints: normalizeStringArray(it.sellingPoints),
             suggestedCopy: it.suggestedCopy || undefined,
             compositionIntent: it.compositionIntent || undefined,
             lighting: it.lighting || undefined,
@@ -720,8 +720,8 @@ function Step3({ task, onNext }: { task: GenerationTask; onNext: () => void }) {
       toast.success(`方案已确认，共 ${res.items.length} 张图片`);
       setConfirmOpen(false);
       onNext();
-    } catch {
-      toast.error("确认失败，请重试");
+    } catch (error) {
+      toast.error(error instanceof Error ? `确认失败：${error.message}` : "确认失败，请重试");
     } finally {
       setSubmitting(false);
     }
@@ -1701,20 +1701,17 @@ function Step1({
           <div className="flex items-center gap-3">
             <span className="w-28 shrink-0 text-zinc-400">主图数量</span>
             <div className="flex items-center gap-2">
-              {[2, 3, 4, 5, 6].map(n => (
-                <button
-                  key={n}
-                  type="button"
-                  onClick={() => setConfig({ ...config, mainImageCount: n })}
-                  className={`flex h-7 w-7 items-center justify-center rounded-md text-sm transition-colors ${
-                    config.mainImageCount === n
-                      ? "bg-zinc-900 text-white"
-                      : "border border-zinc-200 text-zinc-600 hover:border-zinc-400"
-                  }`}
-                >
-                  {n}
-                </button>
-              ))}
+              <Input
+                type="number"
+                min={1}
+                step={1}
+                className="h-8 w-24"
+                value={config.mainImageCount}
+                onChange={(event) => {
+                  const count = Math.floor(Number(event.target.value));
+                  if (Number.isFinite(count) && count >= 1) setConfig({ ...config, mainImageCount: count });
+                }}
+              />
               <span className="text-xs text-zinc-400">张</span>
             </div>
           </div>
@@ -1723,20 +1720,17 @@ function Step1({
           <div className="flex items-center gap-3">
             <span className="w-28 shrink-0 text-zinc-400">详情页数量</span>
             <div className="flex items-center gap-2">
-              {[2, 3, 4, 5, 6].map(n => (
-                <button
-                  key={n}
-                  type="button"
-                  onClick={() => setConfig({ ...config, detailImageCount: n })}
-                  className={`flex h-7 w-7 items-center justify-center rounded-md text-sm transition-colors ${
-                    config.detailImageCount === n
-                      ? "bg-zinc-900 text-white"
-                      : "border border-zinc-200 text-zinc-600 hover:border-zinc-400"
-                  }`}
-                >
-                  {n}
-                </button>
-              ))}
+              <Input
+                type="number"
+                min={1}
+                step={1}
+                className="h-8 w-24"
+                value={config.detailImageCount}
+                onChange={(event) => {
+                  const count = Math.floor(Number(event.target.value));
+                  if (Number.isFinite(count) && count >= 1) setConfig({ ...config, detailImageCount: count });
+                }}
+              />
               <span className="text-xs text-zinc-400">张</span>
             </div>
           </div>
