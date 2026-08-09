@@ -5,6 +5,13 @@ export interface GuideExamples {
   task: Pick<GuideTask, "id" | "productId" | "currentStep"> | null;
 }
 
+export interface GuideLinks {
+  product: string;
+  research: string;
+  task: string;
+  export: string;
+}
+
 export const GUIDE_ROUTE = "/guide";
 
 export function selectGuideExamples(products: GuideProduct[], tasks: GuideTask[]): GuideExamples {
@@ -17,7 +24,7 @@ export function selectGuideExamples(products: GuideProduct[], tasks: GuideTask[]
   };
 }
 
-export function buildGuideLinks(examples: GuideExamples) {
+export function buildGuideLinks(examples: GuideExamples): GuideLinks {
   return {
     product: examples.product ? "/products/" + examples.product.id + "/info" : "/products",
     research: examples.product ? "/products/" + examples.product.id + "/research" : "/products",
