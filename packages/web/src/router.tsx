@@ -8,6 +8,7 @@ import { SettingsPage } from "./pages/settings/SettingsPage.js";
 import { LogsPage } from "./pages/logs/LogsPage.js";
 import { BillingPage } from "./pages/billing/BillingPage.js";
 import { PromptTemplatesPage } from "./pages/prompts/PromptTemplatesPage.js";
+import { GuidePage } from "./pages/guide/GuidePage.js";
 
 export const router = createBrowserRouter([
   {
@@ -37,6 +38,7 @@ export const router = createBrowserRouter([
       { path: "logs", element: <LogsPage /> },
       { path: "billing", element: <BillingPage /> },
       { path: "prompts", element: <PromptTemplatesPage /> },
+      { path: "guide", element: <GuidePage /> },
 
       // Settings
       { path: "settings", element: <Navigate to="/settings/models" replace /> },
