@@ -22,7 +22,7 @@ const TASK_STAGES: Record<number, string> = {
   1: "选择配置",
   2: "生成方向",
   3: "编辑方案",
-  4: "生成中 / 完成",
+  4: "生成与导出",
 };
 
 export function GuidePage() {
@@ -48,7 +48,7 @@ export function GuidePage() {
   const resultState = !examples.task
     ? "等待创建任务"
     : examples.task.currentStep >= 4
-      ? "可以生成并导出"
+      ? "已进入生成与导出"
       : "等待完成任务";
 
   return (
@@ -114,7 +114,7 @@ export function GuidePage() {
           cta="查看生成结果"
           loading={loading}
           rows={[
-            { label: "当前结果", value: resultState, tone: examples.task?.currentStep === 4 ? "ready" : "pending" },
+            { label: "当前结果", value: resultState, tone: examples.task?.currentStep === 4 ? "active" : "pending" },
             { label: "导出格式", value: "主图 / 详情页" },
           ]}
         />

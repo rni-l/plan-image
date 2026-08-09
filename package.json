@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "concurrently -n server,web -c cyan,magenta \"pnpm --filter server dev\" \"pnpm --filter web dev\"",
     "build": "pnpm --filter server build && pnpm --filter web build",
+    "test:web": "pnpm --filter server exec tsx --test ../../packages/web/test/*.test.ts",
     "db:generate": "pnpm --filter server db:generate",
     "db:migrate": "pnpm --filter server db:migrate"
   },
