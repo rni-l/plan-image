@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { ensureDataDirs } from "./lib/paths.js";
@@ -22,7 +23,8 @@ import { seedDefaults } from "./db/seed.js";
 import { registerAllHandlers } from "./jobs/register.js";
 
 const PORT = Number(process.env.PORT ?? 9990);
-const HOST = "127.0.0.1"; // Local-only — never 0.0.0.0
+const HOST = process.env["HOST"] ?? "127.0.0.1";
+const WEB_DIST_DIR = process.env["WEB_DIST_DIR"] ?? path.resolve(process.cwd(), "packages", "web", "dist");
 
 // ---------------------------------------------------------------------------
 // Boot sequence
@@ -67,6 +69,10 @@ app.use(
 // Reject requests not originating from localhost
 app.use("*", securityMiddleware);
 
+// Railway uses this unauthenticated endpoint to determine whether the process
+// is ready to receive traffic. It intentionally exposes no application data.
+app.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -85,10 +91,16 @@ api.route("/logs", logsRouter);
 api.route("/billing", billingRouter);
 api.route("/prompts", promptsRouter);
 
-api.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
-
 app.route("/api/auth", authRouter);
 app.route("/api", api);
+
+// In production the server hosts the built Vite SPA and falls back to its
+// entrypoint for client-side routes. API routes above take precedence.
+app.use("/*", serveStatic({ root: WEB_DIST_DIR }));
+app.get("/*", serveStatic({
+  root: WEB_DIST_DIR,
+  rewriteRequestPath: () => "/index.html",
+}));
 
 // ---------------------------------------------------------------------------
 // Start

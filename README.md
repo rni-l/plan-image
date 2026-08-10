@@ -2,7 +2,7 @@
 
 面向单个操作者的商品图策划、分析与 AI 生成工作台。它将商品资料、竞品素材、设计方向、生成任务和输出图片保存在本机，并可通过百炼、火山方舟或 GPT 中转服务调用模型。
 
-> 当前版本定位为**本地单机应用**。完整系统不能直接部署到 Vercel；原因和云端改造路径见 [Vercel 部署评估与迁移指南](docs/deployment/vercel.md)。
+> 当前版本既支持本地单机运行，也支持以单实例方式部署到 Railway；后者保留 SQLite、运行时文件和轮询 worker。参见 [Railway POC 部署指南](docs/deployment/railway.md)。完整系统暂不能直接部署到 Vercel，原因见 [Vercel 部署评估与迁移指南](docs/deployment/vercel.md)。
 
 ## 功能
 
@@ -90,5 +90,5 @@ docs/
 ## 部署
 
 - 本地单机部署：按上方“本地运行”操作。
+- Railway POC：按 [Railway POC 部署指南](docs/deployment/railway.md) 创建单服务和 `/data` Volume。
 - Vercel：先阅读 [Vercel 部署评估与迁移指南](docs/deployment/vercel.md)。当前仓库不能把完整应用直接部署为 Vercel 项目；需要先完成持久化、异步任务和跨域 API 的云端改造。
-

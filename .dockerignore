@@ -1,0 +1,12 @@
+.git
+.data
+.env
+.env.*
+!.env.example
+node_modules
+packages/*/node_modules
+packages/*/dist
+.claude
+.superpowers
+.worktrees
+exports
