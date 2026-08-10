@@ -1,6 +1,7 @@
-import { NavLink, useLocation } from "react-router-dom";
-import { Package, ListTodo, ScrollText, CircleDollarSign, Settings, FileText, CircleHelp } from "lucide-react";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
+import { Package, ListTodo, ScrollText, CircleDollarSign, Settings, FileText, CircleHelp, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils.js";
+import { api } from "@/lib/api.js";
 
 const mainNav = [
   { to: "/products",  label: "商品库",   icon: Package },
@@ -17,9 +18,18 @@ const bottomNav = [
 
 export function Sidebar() {
   const location = useLocation();
+  const navigate = useNavigate();
 
   function isActive(to: string) {
     return location.pathname.startsWith(to);
+  }
+
+  async function logout() {
+    try {
+      await api.post("/auth/logout", {});
+    } finally {
+      navigate("/login", { replace: true });
+    }
   }
 
   return (
@@ -50,6 +60,14 @@ export function Sidebar() {
         {bottomNav.map(({ to, label, icon: Icon }) => (
           <NavItem key={to} to={to} label={label} icon={Icon} active={isActive("/settings")} />
         ))}
+        <button
+          type="button"
+          onClick={() => void logout()}
+          className="flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-sm text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900"
+        >
+          <LogOut size={16} className="text-zinc-500" />
+          退出登录
+        </button>
       </div>
     </aside>
   );

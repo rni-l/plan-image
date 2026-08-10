@@ -10,6 +10,17 @@ const timestamps = {
 };
 
 // ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
+
+export const authSessions = sqliteTable("auth_sessions", {
+  /** SHA-256 digest of the opaque session cookie, never the cookie value itself. */
+  tokenHash: text("token_hash").primaryKey(),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+});
+
+// ---------------------------------------------------------------------------
 // Products
 // ---------------------------------------------------------------------------
 

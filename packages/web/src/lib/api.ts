@@ -6,6 +6,7 @@ async function request<T>(path: string, opts: FetchOpts = {}): Promise<T> {
   const { body, ...rest } = opts;
   const res = await fetch(`${BASE}${path}`, {
     ...rest,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...rest.headers,
@@ -14,6 +15,7 @@ async function request<T>(path: string, opts: FetchOpts = {}): Promise<T> {
   });
 
   if (!res.ok) {
+    if (res.status === 401) window.dispatchEvent(new Event("auth:unauthorized"));
     const text = await res.text().catch(() => res.statusText);
     throw new ApiError(res.status, text);
   }
@@ -30,11 +32,13 @@ export async function postSSE<T>(
 ): Promise<void> {
   const response = await fetch(`${BASE}${path}`, {
     method: "POST",
+    credentials: "include",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
     body: JSON.stringify(body),
     ...(signal ? { signal } : {}),
   });
   if (!response.ok) {
+    if (response.status === 401) window.dispatchEvent(new Event("auth:unauthorized"));
     const text = await response.text().catch(() => response.statusText);
     throw new ApiError(response.status, text);
   }
@@ -86,8 +90,9 @@ export const api = {
   upload: async <T>(path: string, file: File): Promise<T> => {
     const form = new FormData();
     form.append("file", file);
-    const res = await fetch(`/api${path}`, { method: "POST", body: form });
+    const res = await fetch(`/api${path}`, { method: "POST", body: form, credentials: "include" });
     if (!res.ok) {
+      if (res.status === 401) window.dispatchEvent(new Event("auth:unauthorized"));
       const text = await res.text().catch(() => res.statusText);
       throw new ApiError(res.status, text);
     }

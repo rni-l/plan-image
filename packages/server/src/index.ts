@@ -15,6 +15,7 @@ import { jobsRouter } from "./routes/jobs.js";
 import { logsRouter } from "./routes/logs.js";
 import { billingRouter } from "./routes/billing.js";
 import { promptsRouter } from "./routes/prompts.js";
+import { authMiddleware, authRouter } from "./routes/auth.js";
 import { requestLoggerMiddleware } from "./middleware/request-logger.js";
 import { recoverInterruptedJobs, startWorker, stopWorker } from "./jobs/worker.js";
 import { seedDefaults } from "./db/seed.js";
@@ -73,6 +74,7 @@ app.use("*", securityMiddleware);
 const api = new Hono();
 
 api.use("*", requestLoggerMiddleware);
+api.use("*", authMiddleware);
 
 api.route("/products", productsRouter);
 api.route("/research", researchRouter);
@@ -85,6 +87,7 @@ api.route("/prompts", promptsRouter);
 
 api.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 
+app.route("/api/auth", authRouter);
 app.route("/api", api);
 
 // ---------------------------------------------------------------------------
