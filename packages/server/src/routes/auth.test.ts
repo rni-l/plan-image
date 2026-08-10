@@ -55,3 +55,26 @@ test("protects API routes and creates a fourteen-day session after login", async
   const expired = await app.request("/protected/ping", { headers: { cookie } });
   assert.equal(expired.status, 401);
 });
+
+test("refuses login when ADMIN_PASSWORD is not configured", async () => {
+  assert.ok(auth, "auth routes must be available");
+  if (!auth) return;
+
+  const previousPassword = process.env["ADMIN_PASSWORD"];
+  delete process.env["ADMIN_PASSWORD"];
+  try {
+    const app = new Hono();
+    app.route("/auth", auth.authRouter);
+
+    const response = await app.request("/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: "admin123456" }),
+    });
+
+    assert.equal(response.status, 503);
+  } finally {
+    if (previousPassword === undefined) delete process.env["ADMIN_PASSWORD"];
+    else process.env["ADMIN_PASSWORD"] = previousPassword;
+  }
+});

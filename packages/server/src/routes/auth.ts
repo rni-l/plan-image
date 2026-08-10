@@ -9,11 +9,10 @@ import { authSessions } from "../db/schema.js";
 export const SESSION_COOKIE_NAME = "private_plan_image_session";
 export const SESSION_MAX_AGE_SECONDS = 14 * 24 * 60 * 60;
 
-const DEFAULT_ADMIN_PASSWORD = "admin123456";
 const loginSchema = z.object({ password: z.string().min(1).max(1024) });
 
 function configuredPassword() {
-  return process.env["ADMIN_PASSWORD"] || DEFAULT_ADMIN_PASSWORD;
+  return process.env["ADMIN_PASSWORD"]?.trim() || null;
 }
 
 function passwordsMatch(password: string, expectedPassword: string) {
@@ -59,7 +58,11 @@ export const authRouter = new Hono();
 
 authRouter.post("/login", async (c) => {
   const parsed = loginSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success || !passwordsMatch(parsed.data.password, configuredPassword())) {
+  const expectedPassword = configuredPassword();
+  if (!expectedPassword) {
+    return c.json({ error: "管理员密码未配置" }, 503);
+  }
+  if (!parsed.success || !passwordsMatch(parsed.data.password, expectedPassword)) {
     return c.json({ error: "密码不正确" }, 401);
   }
 

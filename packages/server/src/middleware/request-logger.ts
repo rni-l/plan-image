@@ -3,15 +3,61 @@ import { db } from "../db/index.js";
 import { apiRequestLogs } from "../db/schema.js";
 import { randomUUID } from "node:crypto";
 
+const REDACTED = "[redacted]";
+const SENSITIVE_FIELD_NAMES = new Set([
+  "apikey",
+  "authorization",
+  "password",
+  "token",
+  "accesstoken",
+  "refreshtoken",
+  "secret",
+  "clientsecret",
+]);
+
+function isSensitiveFieldName(name: string): boolean {
+  return SENSITIVE_FIELD_NAMES.has(name.replace(/[-_]/g, "").toLowerCase());
+}
+
+function redactJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactJson);
+  if (!value || typeof value !== "object") return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nestedValue]) => [
+      key,
+      isSensitiveFieldName(key) ? REDACTED : redactJson(nestedValue),
+    ])
+  );
+}
+
 /**
- * Replace base64 data-URI strings with human-readable size placeholders so
- * logs remain readable without storing MB of binary data.
+ * Remove secrets and replace base64 data-URI strings with size placeholders
+ * before request data reaches the persistent log.
  */
-function sanitizeBody(text: string): string {
-  return text.replace(
+export function sanitizeBody(text: string): string {
+  const withoutBinary = text.replace(
     /data:[^;,"'\s]{1,80};base64,[A-Za-z0-9+/=]{200,}/g,
     (m) => `[base64 ~${Math.round(m.length * 0.75 / 1024)}KB]`
   );
+
+  try {
+    return JSON.stringify(redactJson(JSON.parse(withoutBinary)));
+  } catch {
+    return withoutBinary;
+  }
+}
+
+/** Redact sensitive URL query parameters before logging them. */
+export function sanitizeQuery(query: string): string {
+  if (!query) return "";
+
+  const params = new URLSearchParams(query);
+  for (const key of params.keys()) {
+    if (isSensitiveFieldName(key)) params.set(key, REDACTED);
+  }
+  const sanitized = params.toString();
+  return sanitized ? `?${sanitized}` : "";
 }
 
 /**
@@ -53,7 +99,7 @@ export const requestLoggerMiddleware: MiddlewareHandler = async (c, next) => {
       id: randomUUID(),
       method: c.req.method,
       path: url.pathname,
-      queryString: url.search || null,
+      queryString: sanitizeQuery(url.search) || null,
       requestBody,
       responseBody,
       statusCode: c.res.status,

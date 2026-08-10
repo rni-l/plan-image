@@ -17,8 +17,11 @@ export const paths = {
 
 /** Ensure all runtime data directories exist on startup. */
 export function ensureDataDirs(): void {
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dataDir, 0o700);
   for (const dir of Object.values(paths)) {
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
   }
 }
 
