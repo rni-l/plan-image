@@ -12,12 +12,12 @@ import {
 import { and, eq, isNull, desc } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import { Readable } from "node:stream";
 import { saveImageAsset, UploadError } from "../lib/storage.js";
 import { gatewayCall } from "../gateway/index.js";
 import { resolveDefaultModelRoute, resolveModelRoute } from "../gateway/model-route.js";
 import { paths } from "../lib/paths.js";
 import {
+  createProjectArchiveResponse,
   exportProjectArchive,
   importProjectArchive,
   MAX_ARCHIVE_BYTES,
@@ -110,25 +110,7 @@ productsRouter.post("/transfer/project", async (c) => {
 productsRouter.get("/:id/transfer/project", async (c) => {
   try {
     const archive = await exportProjectArchive(c.req.param("id"));
-    const source = fs.createReadStream(archive.archivePath);
-    let cleanupStarted = false;
-    const cleanup = () => {
-      if (cleanupStarted) return;
-      cleanupStarted = true;
-      void archive.cleanup().catch((error: unknown) => {
-        console.error("项目导出包清理失败", { archivePath: archive.archivePath, error });
-      });
-    };
-    source.once("close", cleanup);
-    source.once("error", cleanup);
-    const stream = Readable.toWeb(source) as ReadableStream;
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "application/zip",
-        "Content-Disposition": "attachment; filename=project-export.zip",
-        "Cache-Control": "no-store",
-      },
-    });
+    return createProjectArchiveResponse(archive);
   } catch (error) {
     return c.json({ error: transferMessage(error) }, transferStatus(error));
   }

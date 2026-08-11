@@ -57,7 +57,7 @@ export class TransferCleanupError extends TransferError {
 
 export function transferStatus(error: unknown): 400 | 404 | 413 | 422 | 500 {
   const status = error instanceof TransferError ? error.status : 500;
-  if (error instanceof z.ZodError) return 422;
+  if (error instanceof z.ZodError || error instanceof SyntaxError) return 422;
   return status === 400 || status === 404 || status === 413 || status === 422 ? status : 500;
 }
 
@@ -482,6 +482,37 @@ export async function saveRawRequestBody(
     await fs.promises.rm(destinationPath, { force: true });
     throw asTransferError(error, 400, "无法读取项目包");
   }
+}
+
+export type ProjectArchive = {
+  archivePath: string;
+  cleanup: () => Promise<void>;
+};
+
+/** Stream a generated project archive and release its resources when the source closes. */
+export function createProjectArchiveResponse(
+  archive: ProjectArchive,
+  openReadStream: (archivePath: string) => Readable = (archivePath) => fs.createReadStream(archivePath),
+): Response {
+  const source = openReadStream(archive.archivePath);
+  let cleanupStarted = false;
+  const cleanup = () => {
+    if (cleanupStarted) return;
+    cleanupStarted = true;
+    void archive.cleanup().catch((error: unknown) => {
+      console.error("项目导出包清理失败", { archivePath: archive.archivePath, error });
+    });
+  };
+  source.once("close", cleanup);
+  source.once("error", cleanup);
+  const stream = Readable.toWeb(source) as ReadableStream;
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/zip",
+      "Content-Disposition": "attachment; filename=project-export.zip",
+      "Cache-Control": "no-store",
+    },
+  });
 }
 
 function parseJson(value: string, label: string): unknown {
