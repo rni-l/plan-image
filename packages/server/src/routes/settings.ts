@@ -15,8 +15,25 @@ import { invalidateAdapterCache } from "../gateway/index.js";
 import path from "node:path";
 import { paths } from "../lib/paths.js";
 import { allowedVariablesFor, validateTemplateBody } from "../lib/prompt-service.js";
+import { exportConfig, importConfig, transferMessage, transferStatus } from "../lib/transfer.js";
 
 export const settingsRouter = new Hono();
+
+settingsRouter.get("/transfer/config", async (c) => c.json(await exportConfig(), 200, {
+  "Content-Disposition": "attachment; filename=configuration-export.json",
+  "Cache-Control": "no-store",
+}));
+
+settingsRouter.post("/transfer/config", async (c) => {
+  if (!c.req.header("content-type")?.startsWith("application/json")) {
+    return c.json({ error: "请上传配置 JSON 文件" }, 415);
+  }
+  try {
+    return c.json(await importConfig(await c.req.json()));
+  } catch (error) {
+    return c.json({ error: transferMessage(error) }, transferStatus(error));
+  }
+});
 
 function isPromptTemplateType(value: string): value is PromptTemplateType {
   return value === "design_plan" || value === "image_generation";

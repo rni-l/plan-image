@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { eq, inArray } from "drizzle-orm";
 import { z } from "zod";
@@ -51,6 +53,16 @@ export class TransferCleanupError extends TransferError {
     super(500, `${originalMessage}；清理失败：${cleanupMessage}`);
     this.name = "TransferCleanupError";
   }
+}
+
+export function transferStatus(error: unknown): 400 | 404 | 413 | 422 | 500 {
+  const status = error instanceof TransferError ? error.status : 500;
+  if (error instanceof z.ZodError) return 422;
+  return status === 400 || status === 404 || status === 413 || status === 422 ? status : 500;
+}
+
+export function transferMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "传输失败";
 }
 
 export type TransferManifest = {
@@ -436,6 +448,40 @@ export async function importConfig(input: unknown): Promise<{ importedTemplates:
 function asTransferError(error: unknown, status: number, message: string): TransferError {
   if (error instanceof TransferError) return error;
   return new TransferError(status, `${message}${error instanceof Error ? `：${error.message}` : ""}`);
+}
+
+/** Write a request stream directly to a private temporary archive, enforcing its byte limit. */
+export async function saveRawRequestBody(
+  body: ReadableStream<Uint8Array> | null,
+  destinationDir: string,
+  maxBytes: number,
+): Promise<string> {
+  if (!body) throw new TransferError(400, "项目包不能为空");
+  await fs.promises.mkdir(destinationDir, { recursive: true, mode: 0o700 });
+  const destinationPath = path.join(destinationDir, `project-upload-${randomUUID()}.zip`);
+  let receivedBytes = 0;
+  const byteLimit = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      receivedBytes += chunk.length;
+      if (receivedBytes > maxBytes) {
+        callback(new TransferError(413, "项目包超过 500 MB 大小限制"));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+
+  try {
+    await pipeline(
+      Readable.fromWeb(body as unknown as import("node:stream/web").ReadableStream),
+      byteLimit,
+      fs.createWriteStream(destinationPath, { flags: "wx", mode: 0o600 }),
+    );
+    return destinationPath;
+  } catch (error) {
+    await fs.promises.rm(destinationPath, { force: true });
+    throw asTransferError(error, 400, "无法读取项目包");
+  }
 }
 
 function parseJson(value: string, label: string): unknown {
