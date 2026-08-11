@@ -41,6 +41,18 @@ export class TransferError extends Error {
   }
 }
 
+export class TransferCleanupError extends TransferError {
+  constructor(
+    public readonly originalError: unknown,
+    public readonly cleanupErrors: Error[],
+  ) {
+    const originalMessage = originalError instanceof Error ? originalError.message : String(originalError);
+    const cleanupMessage = cleanupErrors.map((error) => error.message).join("；");
+    super(500, `${originalMessage}；清理失败：${cleanupMessage}`);
+    this.name = "TransferCleanupError";
+  }
+}
+
 export type TransferManifest = {
   formatVersion: 1;
   kind: "project";
@@ -797,6 +809,33 @@ function uniqueIds<T extends { id: string }>(rows: T[], label: string): Set<stri
   return ids;
 }
 
+function assertGloballyUniqueProjectIds(graph: ProjectTransferGraph): void {
+  const collections: Array<[string, Array<{ id: string }>]> = [
+    ["项目", [graph.product]],
+    ["商品素材", graph.productAssets],
+    ["商品规格", graph.specifications],
+    ["商品卖点", graph.sellingPoints],
+    ["竞品素材", graph.competitorAssets],
+    ["分析版本", graph.analysisVersions],
+    ["分析卡片", graph.imageAnalysisCards],
+    ["综合报告", graph.synthesisReports],
+    ["生成任务", graph.generationTasks],
+    ["设计方向", graph.designDirections],
+    ["设计方案", graph.designPlanVersions],
+    ["图片项", graph.imageItems],
+    ["图片版本", graph.imageVersions],
+    ["提示词模板", graph.templates],
+  ];
+  const owners = new Map<string, string>();
+  for (const [label, rows] of collections) {
+    for (const row of rows) {
+      const previous = owners.get(row.id);
+      if (previous) throw new TransferError(422, `项目源数据包含跨实体重复 ID（${previous}、${label}）`);
+      owners.set(row.id, label);
+    }
+  }
+}
+
 function parseIdArray(value: string, label: string): string[] {
   const result = z.array(idSchema).safeParse(parseJson(value, label));
   if (!result.success) throw new TransferError(422, `${label}必须是 ID 数组`);
@@ -822,6 +861,7 @@ function validateProjectGraph(graph: ProjectTransferGraph): void {
   const itemIds = uniqueIds(graph.imageItems, "图片项");
   const versionIds = uniqueIds(graph.imageVersions, "图片版本");
   const templateIds = uniqueIds(graph.templates, "提示词模板");
+  assertGloballyUniqueProjectIds(graph);
   const directionsById = new Map(graph.designDirections.map((row) => [row.id, row]));
   const plansById = new Map(graph.designPlanVersions.map((row) => [row.id, row]));
   const itemsById = new Map(graph.imageItems.map((row) => [row.id, row]));
@@ -1072,6 +1112,43 @@ function makeIdMap(rows: Array<{ id: string }>): Map<string, string> {
   return new Map(rows.map((row) => [row.id, randomUUID()]));
 }
 
+const CLEANUP_ATTEMPTS = 3;
+
+function removePathSyncWithRetries(targetPath: string): Error | null {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= CLEANUP_ATTEMPTS; attempt++) {
+    try {
+      fs.rmSync(targetPath, { recursive: true, force: true });
+      if (!fs.existsSync(targetPath)) return null;
+      lastError = new Error("删除操作返回后路径仍然存在");
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  const detail = lastError instanceof Error ? lastError.message : String(lastError);
+  return new Error(`无法删除 ${targetPath}（重试 ${CLEANUP_ATTEMPTS} 次）：${detail}`, { cause: lastError });
+}
+
+async function removePathWithRetries(targetPath: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= CLEANUP_ATTEMPTS; attempt++) {
+    try {
+      await fs.promises.rm(targetPath, { recursive: true, force: true });
+      try {
+        await fs.promises.access(targetPath);
+        lastError = new Error("删除操作返回后路径仍然存在");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        lastError = error;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  const detail = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(`无法删除 ${targetPath}（重试 ${CLEANUP_ATTEMPTS} 次）：${detail}`, { cause: lastError });
+}
+
 async function persistImportedGraph(
   graph: ProjectTransferGraph,
   staged: StagedAsset[],
@@ -1111,12 +1188,15 @@ async function persistImportedGraph(
     ...asset,
     tempPath: `${asset.targetPath}.import-${randomUUID()}.tmp`,
   }));
-  const cleanupPaths = () => {
+  const cleanupPaths = (): Error[] => {
+    const cleanupErrors: Error[] = [];
     for (const asset of pendingMoves) {
       for (const candidate of [asset.tempPath, asset.targetPath]) {
-        try { fs.rmSync(candidate, { force: true }); } catch { /* best-effort rollback cleanup */ }
+        const cleanupError = removePathSyncWithRetries(candidate);
+        if (cleanupError) cleanupErrors.push(cleanupError);
       }
     }
+    return cleanupErrors;
   };
 
   try {
@@ -1264,8 +1344,10 @@ async function persistImportedGraph(
     });
     return result;
   } catch (error) {
-    cleanupPaths();
-    throw asTransferError(error, 422, "项目导入失败");
+    const importError = asTransferError(error, 422, "项目导入失败");
+    const cleanupErrors = cleanupPaths();
+    if (cleanupErrors.length) throw new TransferCleanupError(importError, cleanupErrors);
+    throw importError;
   }
 }
 
@@ -1293,8 +1375,19 @@ export async function importProjectArchive(
     const { manifest, graph } = await readAndValidateProjectFiles(temp);
     await verifyManifestFiles(temp, manifest);
     const staged = await stageImportedAssets(temp, graph);
-    return await persistImportedGraph(graph, staged);
-  } finally {
-    await fs.promises.rm(temp, { recursive: true, force: true });
+    const result = await persistImportedGraph(graph, staged);
+    void removePathWithRetries(temp).catch((error: unknown) => {
+      console.error("项目导入已提交，但临时目录清理失败", { temp, error });
+    });
+    return result;
+  } catch (error) {
+    try {
+      await removePathWithRetries(temp);
+    } catch (cleanupError) {
+      const originalError = asTransferError(error, 422, "项目导入失败");
+      const normalizedCleanupError = cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError));
+      throw new TransferCleanupError(originalError, [normalizedCleanupError]);
+    }
+    throw error;
   }
 }

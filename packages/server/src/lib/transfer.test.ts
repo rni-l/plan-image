@@ -21,6 +21,7 @@ const {
   importProjectArchive,
   MAX_ARCHIVE_BYTES,
   MAX_EXTRACTED_BYTES,
+  TransferCleanupError,
   TransferError,
 } = await import("./transfer.js");
 const execFileAsync = promisify(execFile);
@@ -393,6 +394,115 @@ async function tamperFirstAsset(archivePath: string): Promise<string> {
   }
 }
 
+type MutableProjectGraph = {
+  productAssets: Array<{ id: string }>;
+  competitorAssets: Array<{ id: string }>;
+  imageItems: Array<{ productAssetId: string | null; referenceAssetIds: string | null }>;
+};
+
+async function rewriteProjectArchive(
+  archivePath: string,
+  mutate: (graph: MutableProjectGraph) => void,
+): Promise<string> {
+  const root = await fs.promises.mkdtemp(path.join(paths.exports, "rewritten-project-"));
+  const target = path.join(paths.exports, `rewritten-${randomUUID()}.zip`);
+  try {
+    await execFileAsync("/usr/bin/unzip", ["-qq", archivePath, "-d", root]);
+    const projectPath = path.join(root, "project.json");
+    const graph = JSON.parse(await fs.promises.readFile(projectPath, "utf8")) as MutableProjectGraph;
+    mutate(graph);
+    await fs.promises.writeFile(projectPath, `${JSON.stringify(graph, null, 2)}\n`);
+
+    const manifestPath = path.join(root, "manifest.json");
+    const manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8")) as {
+      files: Array<{ path: string; bytes: number; checksum: string }>;
+    };
+    const projectEntry = manifest.files.find((file) => file.path === "project.json");
+    assert.ok(projectEntry);
+    projectEntry.bytes = (await fs.promises.stat(projectPath)).size;
+    projectEntry.checksum = await sha256File(projectPath);
+    await fs.promises.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await execFileAsync("/usr/bin/zip", ["-q", "-r", target, "."], { cwd: root });
+    return target;
+  } finally {
+    await fs.promises.rm(root, { recursive: true, force: true });
+  }
+}
+
+async function projectTableCounts() {
+  const [
+    productRows,
+    productAssetRows,
+    specificationRows,
+    sellingPointRows,
+    competitorAssetRows,
+    analysisRows,
+    cardRows,
+    reportRows,
+    templateRows,
+    taskRows,
+    directionRows,
+    planRows,
+    itemRows,
+    versionRows,
+    jobRows,
+  ] = await Promise.all([
+    db.select().from(schema.products),
+    db.select().from(schema.productAssets),
+    db.select().from(schema.productSpecifications),
+    db.select().from(schema.sellingPoints),
+    db.select().from(schema.competitorAssets),
+    db.select().from(schema.analysisVersions),
+    db.select().from(schema.imageAnalysisCards),
+    db.select().from(schema.synthesisReports),
+    db.select().from(schema.promptTemplates),
+    db.select().from(schema.generationTasks),
+    db.select().from(schema.designDirections),
+    db.select().from(schema.designPlanVersions),
+    db.select().from(schema.imageItems),
+    db.select().from(schema.imageVersions),
+    db.select().from(schema.backgroundJobs),
+  ]);
+  return {
+    products: productRows.length,
+    productAssets: productAssetRows.length,
+    specifications: specificationRows.length,
+    sellingPoints: sellingPointRows.length,
+    competitorAssets: competitorAssetRows.length,
+    analysisVersions: analysisRows.length,
+    imageAnalysisCards: cardRows.length,
+    synthesisReports: reportRows.length,
+    templates: templateRows.length,
+    generationTasks: taskRows.length,
+    designDirections: directionRows.length,
+    designPlanVersions: planRows.length,
+    imageItems: itemRows.length,
+    imageVersions: versionRows.length,
+    backgroundJobs: jobRows.length,
+  };
+}
+
+async function relativeFileTree(root: string): Promise<string[]> {
+  const files: string[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    for (const entry of await fs.promises.readdir(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) await visit(absolute);
+      else files.push(path.relative(root, absolute).split(path.sep).join("/"));
+    }
+  };
+  await visit(root);
+  return files.sort();
+}
+
+async function assetFolderSnapshot() {
+  return {
+    originals: await relativeFileTree(paths.originals),
+    generated: await relativeFileTree(paths.generated),
+    masks: await relativeFileTree(paths.masks),
+  };
+}
+
 test("round-trips a complete project with new IDs, image bytes and masks", async () => {
   const source = await insertCompleteProjectFixture();
   const archive = await exportProjectArchive(source.productId);
@@ -462,6 +572,154 @@ test("rejects a manifest hash mismatch without creating a product", async () => 
   } finally {
     await archive.cleanup();
     await fs.promises.rm(tamperedArchivePath, { force: true });
+  }
+});
+
+test("does not turn a committed import into failure when extraction cleanup fails", async (t) => {
+  const source = await insertCompleteProjectFixture();
+  const archive = await exportProjectArchive(source.productId);
+  const originalRm = fs.promises.rm.bind(fs.promises);
+  const diagnostics: unknown[][] = [];
+  let failedCleanupPath: string | undefined;
+  t.mock.method(fs.promises, "rm", async (target: fs.PathLike, options?: fs.RmOptions) => {
+    if (String(target).includes("project-import-")) {
+      failedCleanupPath = String(target);
+      throw new Error("injected extraction cleanup failure");
+    }
+    return originalRm(target, options);
+  });
+  t.mock.method(console, "error", (...values: unknown[]) => { diagnostics.push(values); });
+
+  try {
+    const imported = await importProjectArchive(archive.archivePath);
+    const [persisted] = await db.select().from(schema.products).where(eq(schema.products.id, imported.productId));
+    assert.equal(persisted?.name, "完整迁移项目");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(diagnostics.some((values) => String(values[0]).includes("临时目录清理失败")), true);
+  } finally {
+    t.mock.restoreAll();
+    if (failedCleanupPath) await originalRm(failedCleanupPath, { recursive: true, force: true });
+    await archive.cleanup();
+  }
+});
+
+test("rejects source IDs duplicated across entity types before database writes", async () => {
+  const source = await insertCompleteProjectFixture();
+  const archive = await exportProjectArchive(source.productId);
+  const duplicateArchive = await rewriteProjectArchive(archive.archivePath, (graph) => {
+    const duplicatedId = graph.competitorAssets[0]!.id;
+    graph.productAssets[0]!.id = duplicatedId;
+    graph.imageItems[0]!.productAssetId = duplicatedId;
+    graph.imageItems[0]!.referenceAssetIds = JSON.stringify([duplicatedId]);
+  });
+  const countBefore = await productCount();
+  try {
+    await assert.rejects(() => importProjectArchive(duplicateArchive), /跨实体重复 ID/);
+    assert.equal(await productCount(), countBefore);
+  } finally {
+    await archive.cleanup();
+    await fs.promises.rm(duplicateArchive, { force: true });
+  }
+});
+
+test("rolls back every project table and retries staged-asset cleanup after persistence failure", async (t) => {
+  const source = await insertCompleteProjectFixture();
+  const archive = await exportProjectArchive(source.productId);
+  const tablesBefore = await projectTableCounts();
+  const assetsBefore = await assetFolderSnapshot();
+  const originalRenameSync = fs.renameSync.bind(fs);
+  const originalRmSync = fs.rmSync.bind(fs);
+  const failedOnce = new Set<string>();
+  const stagedPaths = new Set<string>();
+  let renameCalls = 0;
+  let movedFinalPath: string | undefined;
+  t.mock.method(fs, "renameSync", (sourcePath: fs.PathLike, targetPath: fs.PathLike) => {
+    if (String(sourcePath).includes(".import-")) {
+      renameCalls += 1;
+      if (renameCalls === 2) throw new Error("injected persistence rename failure");
+      movedFinalPath = String(targetPath);
+    }
+    return originalRenameSync(sourcePath, targetPath);
+  });
+  t.mock.method(fs, "rmSync", (targetPath: fs.PathLike, options?: fs.RmOptions) => {
+    const target = String(targetPath);
+    if (target.includes(".import-")) {
+      stagedPaths.add(target);
+      if (!failedOnce.has(target)) {
+        failedOnce.add(target);
+        throw new Error("injected transient cleanup failure");
+      }
+    }
+    return originalRmSync(targetPath, options);
+  });
+
+  let importError: unknown;
+  try {
+    await importProjectArchive(archive.archivePath);
+  } catch (error) {
+    importError = error;
+  } finally {
+    t.mock.restoreAll();
+  }
+  try {
+    assert.ok(importError instanceof TransferError);
+    assert.match(importError.message, /injected persistence rename failure/);
+    assert.deepEqual(await projectTableCounts(), tablesBefore);
+    assert.deepEqual(await assetFolderSnapshot(), assetsBefore);
+    assert.equal(stagedPaths.size > 0, true);
+    assert.equal([...stagedPaths].every((target) => !fs.existsSync(target)), true);
+    assert.equal(movedFinalPath === undefined || !fs.existsSync(movedFinalPath), true);
+  } finally {
+    for (const target of stagedPaths) originalRmSync(target, { force: true });
+    await archive.cleanup();
+  }
+});
+
+test("surfaces persistent rollback cleanup failure with original error context", async (t) => {
+  const source = await insertCompleteProjectFixture();
+  const archive = await exportProjectArchive(source.productId);
+  const tablesBefore = await projectTableCounts();
+  const originalRenameSync = fs.renameSync.bind(fs);
+  const originalRmSync = fs.rmSync.bind(fs);
+  const strandedPaths = new Set<string>();
+  let renameCalls = 0;
+  let movedFinalPath: string | undefined;
+  t.mock.method(fs, "renameSync", (sourcePath: fs.PathLike, targetPath: fs.PathLike) => {
+    if (String(sourcePath).includes(".import-")) {
+      renameCalls += 1;
+      if (renameCalls === 2) throw new Error("injected persistence failure for cleanup context");
+      movedFinalPath = String(targetPath);
+    }
+    return originalRenameSync(sourcePath, targetPath);
+  });
+  t.mock.method(fs, "rmSync", (targetPath: fs.PathLike, options?: fs.RmOptions) => {
+    const target = String(targetPath);
+    if (target.includes(".import-") || target === movedFinalPath) {
+      strandedPaths.add(target);
+      throw new Error("injected persistent cleanup failure");
+    }
+    return originalRmSync(targetPath, options);
+  });
+
+  let importError: unknown;
+  try {
+    await importProjectArchive(archive.archivePath);
+  } catch (error) {
+    importError = error;
+  } finally {
+    t.mock.restoreAll();
+  }
+  try {
+    assert.equal((importError as Error | undefined)?.constructor.name, "TransferCleanupError");
+    assert.equal(typeof TransferCleanupError, "function");
+    assert.match((importError as Error).message, /清理失败/);
+    assert.match(String((importError as { originalError?: unknown }).originalError), /injected persistence failure for cleanup context/);
+    assert.equal(((importError as { cleanupErrors?: unknown[] }).cleanupErrors?.length ?? 0) > 0, true);
+    assert.deepEqual(await projectTableCounts(), tablesBefore);
+    assert.equal(strandedPaths.size > 0, true);
+  } finally {
+    for (const target of strandedPaths) originalRmSync(target, { force: true });
+    await archive.cleanup();
   }
 });
 
