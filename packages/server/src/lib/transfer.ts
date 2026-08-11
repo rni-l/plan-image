@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db } from "../db/index.js";
 import {
   modelProviders,
+  modelCallLogs,
   modelSceneRoutes,
   outputPresets,
   promptTemplates,
@@ -116,6 +117,7 @@ export async function importConfig(input: unknown): Promise<{ importedTemplates:
       }
     }
 
+    tx.update(modelCallLogs).set({ modelRouteId: null }).run();
     tx.delete(modelSceneRoutes).run();
     tx.delete(outputPresets).run();
 
@@ -142,11 +144,17 @@ export async function importConfig(input: unknown): Promise<{ importedTemplates:
     }
 
     const existingTemplates = tx.select().from(promptTemplates).all();
-    const importedTemplates = config.templates.filter((candidate) => !existingTemplates.some((current) => (
-      current.type === candidate.type
-      && current.name === candidate.name
-      && current.body === candidate.body
-    )));
+    const templateKeys = new Set(existingTemplates.map((template) => JSON.stringify([
+      template.type,
+      template.name,
+      template.body,
+    ])));
+    const importedTemplates = config.templates.filter((candidate) => {
+      const key = JSON.stringify([candidate.type, candidate.name, candidate.body]);
+      if (templateKeys.has(key)) return false;
+      templateKeys.add(key);
+      return true;
+    });
 
     if (importedTemplates.length) {
       tx.insert(promptTemplates).values(importedTemplates.map((template) => ({

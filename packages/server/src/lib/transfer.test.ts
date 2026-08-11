@@ -94,6 +94,39 @@ test("exports portable configuration without secrets or key hints", async () => 
 });
 
 test("imports routes and presets while retaining current key state", async () => {
+  const now = new Date();
+  await db.insert(schema.modelSceneRoutes).values({
+    id: "old-route",
+    scene: "design_plan",
+    providerId: "p",
+    modelId: "old-model",
+    billingModelId: null,
+    parameters: null,
+    isDefault: true,
+    updatedAt: now,
+  });
+  await db.insert(schema.modelCallLogs).values({
+    id: "historical-log",
+    modelRouteId: "old-route",
+    scene: "design_plan",
+    provider: "gpt_proxy",
+    model: "old-model",
+    status: "succeeded",
+    createdAt: now,
+  });
+  await db.insert(schema.outputPresets).values({
+    id: "old-preset",
+    name: "旧预设",
+    presetType: "detail_module",
+    width: 790,
+    height: 1000,
+    format: "jpg",
+    quality: 90,
+    isDefault: true,
+    createdAt: now,
+    updatedAt: now,
+  });
+
   const result = await importConfig(configFixture);
 
   assert.equal(result.importedTemplates, 1);
@@ -113,8 +146,19 @@ test("imports routes and presets while retaining current key state", async () =>
   }]);
   assert.equal(routes[0]?.providerId, provider?.id);
 
+  const [historicalLog] = await db.select().from(schema.modelCallLogs)
+    .where(eq(schema.modelCallLogs.id, "historical-log"));
+  assert.equal(historicalLog?.modelRouteId, null);
+
   const presets = await db.select().from(schema.outputPresets);
   assert.deepEqual(presets.map(({ id, createdAt, updatedAt, ...preset }) => preset), configFixture.presets);
+
+  const [builtIn, archivedCustom] = await Promise.all([
+    db.select().from(schema.promptTemplates).where(eq(schema.promptTemplates.id, "builtin")),
+    db.select().from(schema.promptTemplates).where(eq(schema.promptTemplates.id, "custom")),
+  ]);
+  assert.equal(builtIn[0]?.isBuiltIn, true);
+  assert.equal(archivedCustom[0]?.archivedAt?.getTime(), 1_700_000_000_000);
 });
 
 test("does not import duplicate custom templates", async () => {
@@ -123,5 +167,29 @@ test("does not import duplicate custom templates", async () => {
   assert.equal(result.importedTemplates, 0);
   const templates = await db.select().from(schema.promptTemplates)
     .where(eq(schema.promptTemplates.name, "导入模板"));
+  assert.equal(templates.length, 1);
+});
+
+test("deduplicates equivalent custom templates within one import package", async () => {
+  const duplicate = {
+    type: "design_plan",
+    name: "包内重复模板",
+    description: null,
+    body: "为 {{product_name}} 提供设计方向",
+    isDefault: false,
+    archivedAt: null,
+  } as const;
+  const result = await importConfig({
+    formatVersion: 1,
+    kind: "config",
+    providers: [],
+    routes: [],
+    presets: [],
+    templates: [duplicate, duplicate],
+  });
+
+  assert.equal(result.importedTemplates, 1);
+  const templates = await db.select().from(schema.promptTemplates)
+    .where(eq(schema.promptTemplates.name, duplicate.name));
   assert.equal(templates.length, 1);
 });
