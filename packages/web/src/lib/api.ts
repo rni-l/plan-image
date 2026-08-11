@@ -98,4 +98,26 @@ export const api = {
     }
     return res.json() as Promise<T>;
   },
+
+  uploadRawFile: async <T>(path: string, file: File, contentType: string): Promise<T> => {
+    const res = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": contentType },
+      body: file,
+    });
+    if (!res.ok) {
+      if (res.status === 401) window.dispatchEvent(new Event("auth:unauthorized"));
+      const text = await res.text().catch(() => res.statusText);
+      throw new ApiError(res.status, text);
+    }
+    return res.json() as Promise<T>;
+  },
+
+  download: (path: string, filename: string) => {
+    const anchor = document.createElement("a");
+    anchor.href = `${BASE}${path}`;
+    anchor.download = filename;
+    anchor.click();
+  },
 };
