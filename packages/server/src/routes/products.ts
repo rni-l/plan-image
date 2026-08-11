@@ -15,6 +15,16 @@ import fs from "node:fs";
 import { saveImageAsset, UploadError } from "../lib/storage.js";
 import { gatewayCall } from "../gateway/index.js";
 import { resolveDefaultModelRoute, resolveModelRoute } from "../gateway/model-route.js";
+import { paths } from "../lib/paths.js";
+import {
+  createProjectArchiveResponse,
+  exportProjectArchive,
+  importProjectArchive,
+  MAX_ARCHIVE_BYTES,
+  saveRawRequestBody,
+  transferMessage,
+  transferStatus,
+} from "../lib/transfer.js";
 
 export const productsRouter = new Hono();
 
@@ -73,6 +83,36 @@ productsRouter.get("/assets/file", async (c) => {
     });
   } catch {
     return c.json({ error: "Not found" }, 404);
+  }
+});
+
+// Project transfer routes must precede the dynamic /:id routes below.
+productsRouter.post("/transfer/project", async (c) => {
+  if (c.req.header("content-type") !== "application/zip") {
+    return c.json({ error: "请上传 ZIP 项目包" }, 415);
+  }
+  const declaredBytes = c.req.header("content-length");
+  if (declaredBytes && /^\d+$/.test(declaredBytes) && BigInt(declaredBytes) > BigInt(MAX_ARCHIVE_BYTES)) {
+    return c.json({ error: "项目包超过 500 MB 大小限制" }, 413);
+  }
+
+  let upload: string | undefined;
+  try {
+    upload = await saveRawRequestBody(c.req.raw.body, paths.exports, MAX_ARCHIVE_BYTES);
+    return c.json(await importProjectArchive(upload), 201);
+  } catch (error) {
+    return c.json({ error: transferMessage(error) }, transferStatus(error));
+  } finally {
+    if (upload) await fs.promises.rm(upload, { force: true });
+  }
+});
+
+productsRouter.get("/:id/transfer/project", async (c) => {
+  try {
+    const archive = await exportProjectArchive(c.req.param("id"));
+    return createProjectArchiveResponse(archive);
+  } catch (error) {
+    return c.json({ error: transferMessage(error) }, transferStatus(error));
   }
 });
 

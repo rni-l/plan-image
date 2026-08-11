@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Package, Plus } from "lucide-react";
+import { Package, Plus, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -30,6 +30,7 @@ export function ProductsPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadProducts();
@@ -46,15 +47,41 @@ export function ProductsPage() {
     }
   }
 
+  async function handleProjectFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const result = await api.uploadRawFile<{ productId: string; productName: string }>(
+        "/products/transfer/project",
+        file,
+        "application/zip",
+      );
+      toast.success(`已导入「${result.productName}」，未恢复未完成后台任务`);
+      navigate(`/products/${result.productId}/info`);
+    } catch {
+      toast.error("导入项目失败，请确认 ZIP 文件有效");
+    } finally {
+      event.target.value = "";
+    }
+  }
+
   return (
     <div className="px-8 py-8">
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <h1 className="page-title text-xl text-zinc-900">商品库</h1>
-        <Button onClick={() => setDialogOpen(true)}>
-          <Plus size={16} />
-          新建商品
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => importInputRef.current?.click()}>
+            <Upload size={16} />
+            导入项目
+          </Button>
+          <input ref={importInputRef} type="file" accept=".zip" className="hidden" onChange={handleProjectFile} />
+          <Button onClick={() => setDialogOpen(true)}>
+            <Plus size={16} />
+            新建商品
+          </Button>
+        </div>
       </div>
 
       {/* Content */}

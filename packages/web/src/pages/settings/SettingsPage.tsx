@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Archive, CheckCircle, Circle, Copy, FileText, Plus, Save, Star, Trash2 } from "lucide-react";
+import { Archive, CheckCircle, Circle, Copy, Download, FileText, Plus, Save, Star, Trash2, Upload } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,6 +64,7 @@ const SECTIONS = [
   { to: "/settings/models",  label: "模型供应商" },
   { to: "/settings/routing", label: "场景路由" },
   { to: "/settings/presets", label: "输出预设" },
+  { to: "/settings/transfer", label: "数据迁移" },
 ] as const;
 
 export function SettingsPage() {
@@ -96,6 +97,56 @@ export function SettingsPage() {
         {section === "models"  && <ModelsSection />}
         {section === "routing" && <RoutingSection />}
         {section === "presets" && <PresetsSection />}
+        {section === "transfer" && <TransferSection />}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Data transfer section
+// ---------------------------------------------------------------------------
+
+function TransferSection() {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  async function handleConfigFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      if (!window.confirm("导入将替换模型路由和输出预设；不会修改当前 API 密钥。是否继续？")) return;
+      try {
+        JSON.parse(await file.text());
+      } catch {
+        toast.error("配置文件不是有效的 JSON");
+        return;
+      }
+      await api.uploadRawFile("/settings/transfer/config", file, "application/json");
+      toast.success("配置已导入");
+    } catch {
+      toast.error("导入配置失败，请重试");
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  return (
+    <div className="max-w-2xl">
+      <h2 className="section-title mb-1 text-base text-zinc-900">数据迁移</h2>
+      <p className="mb-6 text-sm text-zinc-500">导出或导入模型路由与输出预设配置。</p>
+      <div className="rounded-lg border border-zinc-100 p-5">
+        <p className="text-sm font-medium text-zinc-900">配置文件</p>
+        <p className="mt-1 text-sm text-zinc-500">导入会替换模型路由和输出预设，当前 API 密钥不会变更。</p>
+        <div className="mt-4 flex gap-2">
+          <Button variant="outline" onClick={() => api.download("/settings/transfer/config", "configuration-export.json")}>
+            <Download size={14} /> 导出配置
+          </Button>
+          <Button variant="outline" onClick={() => inputRef.current?.click()}>
+            <Upload size={14} /> 导入配置
+          </Button>
+          <input ref={inputRef} type="file" accept="application/json,.json" className="hidden" onChange={handleConfigFile} />
+        </div>
       </div>
     </div>
   );

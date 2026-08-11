@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useParams, NavLink, Navigate } from "react-router-dom";
+import { Download } from "lucide-react";
 import { api } from "@/lib/api";
+import { Button } from "@/components/ui/button";
 import { ProductInfoTab } from "./tabs/ProductInfoTab";
 import { ResearchTab } from "./tabs/ResearchTab";
 import { TasksTab } from "./tabs/TasksTab";
@@ -35,13 +37,18 @@ export function ProductWorkbench() {
     <div className="flex h-full flex-col">
       {/* Breadcrumb + tabs */}
       <div className="border-b border-zinc-200 px-8">
-        <p className="mb-3 pt-6 text-xs text-zinc-400">
-          <NavLink to="/products" className="hover:text-zinc-700">
-            商品库
-          </NavLink>
-          {" / "}
-          <span className="text-zinc-600">{product?.name ?? "…"}</span>
-        </p>
+        <div className="mb-3 flex items-center justify-between pt-4">
+          <p className="text-xs text-zinc-400">
+            <NavLink to="/products" className="hover:text-zinc-700">
+              商品库
+            </NavLink>
+            {" / "}
+            <span className="text-zinc-600">{product?.name ?? "…"}</span>
+          </p>
+          <Button size="sm" variant="outline" onClick={() => api.download(`/products/${productId}/transfer/project`, `${product?.name ?? "project"}-export.zip`)}>
+            <Download size={14} /> 导出项目
+          </Button>
+        </div>
         <nav className="flex gap-1">
           {TABS.map(({ key, label }) => (
             <NavLink
