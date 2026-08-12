@@ -169,17 +169,18 @@ productsRouter.put("/:id/specs", async (c) => {
 
   // better-sqlite3 is synchronous — transaction callback must be sync too
   db.transaction((tx) => {
-    tx.delete(productSpecifications).where(eq(productSpecifications.productId, productId));
+    tx.delete(productSpecifications).where(eq(productSpecifications.productId, productId)).run();
+    let sortOrder = 0;
     for (let i = 0; i < body.specs.length; i++) {
       const s = body.specs[i];
-      if (!s) continue;
+      if (!s || !s.label?.trim() || !s.value?.trim()) continue;
       tx.insert(productSpecifications).values({
         id: randomUUID(),
         productId,
-        label: s.label,
-        value: s.value,
-        sortOrder: i,
-      });
+        label: s.label.trim(),
+        value: s.value.trim(),
+        sortOrder: sortOrder++,
+      }).run();
     }
   });
   return c.body(null, 204);
@@ -192,16 +193,17 @@ productsRouter.put("/:id/selling-points", async (c) => {
 
   // better-sqlite3 is synchronous — transaction callback must be sync too
   db.transaction((tx) => {
-    tx.delete(sellingPoints).where(eq(sellingPoints.productId, productId));
+    tx.delete(sellingPoints).where(eq(sellingPoints.productId, productId)).run();
+    let sortOrder = 0;
     for (let i = 0; i < body.sellingPoints.length; i++) {
       const content = body.sellingPoints[i];
-      if (content === undefined) continue;
+      if (!content || !content.trim()) continue;
       tx.insert(sellingPoints).values({
         id: randomUUID(),
         productId,
-        content,
-        sortOrder: i,
-      });
+        content: content.trim(),
+        sortOrder: sortOrder++,
+      }).run();
     }
   });
   return c.body(null, 204);
